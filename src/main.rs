@@ -116,8 +116,6 @@ fn capture_screen(
     let file_path = day_dir.join(&file_name);
     let file_str = file_path.to_string_lossy().to_string();
 
-    let is_daemon = get_running_pid().is_some() || hidden.is_some();
-
     // 1. Resolve target workspace and output
     let all_workspaces = niri::get_all_workspaces().unwrap_or_default();
     let target_ws = cfg
@@ -193,30 +191,21 @@ fn capture_screen(
         });
     }
 
-    // 2. Perform capture with Layer::Bottom occluding barrier
-    let res = if is_daemon {
-        // Daemon is active: trigger Layer::Bottom cover and hide indicator via worktrack.hide
-        if let Some(h) = hidden {
-            h.store(true, Ordering::SeqCst);
-        }
+    // 2. Perform capture (briefly hide indicator badge so it does not appear on screenshot)
+    if let Some(h) = hidden {
+        h.store(true, Ordering::SeqCst);
         let hide_file = runtime_dir().join("worktrack.hide");
         let _ = fs::File::create(&hide_file);
-        std::thread::sleep(Duration::from_millis(70));
+        std::thread::sleep(Duration::from_millis(50));
+    }
 
-        let r = niri::capture_screenshot(&file_str, Some(&target_output));
+    let res = niri::capture_screenshot(&file_str, Some(&target_output));
 
-        if let Some(h) = hidden {
-            h.store(false, Ordering::SeqCst);
-        }
+    if let Some(h) = hidden {
+        h.store(false, Ordering::SeqCst);
+        let hide_file = runtime_dir().join("worktrack.hide");
         let _ = fs::remove_file(&hide_file);
-        r
-    } else {
-        // Standalone CLI invocation (daemon not running): mount Layer::Bottom barrier directly
-        match indicator::capture_with_standalone_barrier(&file_str, &target_output) {
-            Ok(()) => Ok(target_output.clone()),
-            Err(e) => Err(e),
-        }
-    };
+    }
 
     // 3. Restore previous workspace/window if we switched
     if needs_restore {
@@ -320,6 +309,7 @@ fn run_daemon(cfg: Config) {
         .unwrap_or_else(std::time::Instant::now);
 
     let mut prev_paused = paused.load(Ordering::Relaxed);
+    let capturing = Arc::new(AtomicBool::new(false));
 
     while running.load(Ordering::SeqCst) {
         let is_paused = pause_file_path().exists();
@@ -349,16 +339,29 @@ fn run_daemon(cfg: Config) {
             countdown.store(rem.max(0), Ordering::Relaxed);
         }
 
-        if !is_paused && last_capture.elapsed() >= Duration::from_secs(cfg.interval_secs) {
+        if !is_paused
+            && last_capture.elapsed() >= Duration::from_secs(cfg.interval_secs)
+            && !capturing.load(Ordering::SeqCst)
+        {
             last_capture = std::time::Instant::now();
             countdown.store(cfg.interval_secs as i64, Ordering::Relaxed);
+            capturing.store(true, Ordering::SeqCst);
+
+            let cap_cfg = cfg.clone();
             let today = Local::now().format("%Y-%m-%d").to_string();
             let day_dir = cfg.dir.join(&today);
             let _ = fs::create_dir_all(&day_dir);
-            capture_screen(&day_dir, &cfg, Some(&hidden), Some(&target_output));
+            let cap_hidden = hidden.clone();
+            let cap_target = target_output.clone();
+            let cap_flag = capturing.clone();
+
+            std::thread::spawn(move || {
+                capture_screen(&day_dir, &cap_cfg, Some(&cap_hidden), Some(&cap_target));
+                cap_flag.store(false, Ordering::SeqCst);
+            });
         }
 
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(Duration::from_millis(100));
     }
 
     let today = Local::now().format("%Y-%m-%d").to_string();

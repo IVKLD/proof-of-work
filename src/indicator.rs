@@ -36,13 +36,9 @@ pub struct MonitorSurface {
     pub output: Option<wl_output::WlOutput>,
     pub output_name: Option<String>,
     pub indicator_layer: LayerSurface,
-    pub bg_cover_layer: LayerSurface,
     pub scale: i32,
     pub ui_scale: f32,
     pub indicator_configured: bool,
-    pub bg_configured: bool,
-    pub bg_width: u32,
-    pub bg_height: u32,
     pub pool: SlotPool,
 }
 
@@ -179,10 +175,8 @@ impl ShmHandler for IndicatorState {
 
 impl LayerShellHandler for IndicatorState {
     fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, layer: &LayerSurface) {
-        self.surfaces.retain(|s| {
-            s.indicator_layer.wl_surface() != layer.wl_surface()
-                && s.bg_cover_layer.wl_surface() != layer.wl_surface()
-        });
+        self.surfaces
+            .retain(|s| s.indicator_layer.wl_surface() != layer.wl_surface());
         if self.surfaces.is_empty() {
             self.running.store(false, Ordering::Relaxed);
         }
@@ -193,17 +187,12 @@ impl LayerShellHandler for IndicatorState {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
         layer: &LayerSurface,
-        configure: LayerSurfaceConfigure,
+        _configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
         for s in &mut self.surfaces {
             if s.indicator_layer.wl_surface() == layer.wl_surface() {
                 s.indicator_configured = true;
-                break;
-            } else if s.bg_cover_layer.wl_surface() == layer.wl_surface() {
-                s.bg_configured = true;
-                s.bg_width = configure.new_size.0;
-                s.bg_height = configure.new_size.1;
                 break;
             }
         }
@@ -286,29 +275,6 @@ impl IndicatorState {
 
         indicator_layer.commit();
 
-        // 2. Wallpaper barrier surface on Layer::Bottom (sits ABOVE mpvpaper and BELOW windows)
-        let bg_surface = self.compositor_state.create_surface(&self.qh);
-        let bg_cover_layer = self.layer_shell.create_layer_surface(
-            &self.qh,
-            bg_surface,
-            Layer::Bottom,
-            Some("worktrack-bg-barrier"),
-            output,
-        );
-
-        bg_cover_layer.set_size(0, 0);
-        bg_cover_layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
-        bg_cover_layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-
-        if let Ok(region) = smithay_client_toolkit::compositor::Region::new(&self.compositor_state)
-        {
-            bg_cover_layer
-                .wl_surface()
-                .set_input_region(Some(region.wl_region()));
-        }
-
-        bg_cover_layer.commit();
-
         let output_name = output
             .and_then(|o| self.output_state.info(o))
             .and_then(|i| i.name);
@@ -320,13 +286,9 @@ impl IndicatorState {
             output: output.cloned(),
             output_name,
             indicator_layer,
-            bg_cover_layer,
             scale: 1,
             ui_scale,
             indicator_configured: false,
-            bg_configured: false,
-            bg_width: 0,
-            bg_height: 0,
             pool,
         });
     }
@@ -349,7 +311,7 @@ impl IndicatorState {
                 (_, None) => true,
             };
 
-            // 1. Draw indicator pill with countdown & dot
+            // Draw indicator pill with countdown & dot
             if s.indicator_configured {
                 let scale = s.scale.max(1);
                 let total_scale = s.ui_scale * (scale as f32);
@@ -379,43 +341,6 @@ impl IndicatorState {
                     surface.attach(Some(buffer.wl_buffer()), 0, 0);
                     surface.damage_buffer(0, 0, phys_w, phys_h);
                     s.indicator_layer.commit();
-                }
-            }
-
-            // 2. Manage Layer::Bottom wallpaper barrier
-            if s.bg_configured && s.bg_width > 0 && s.bg_height > 0 {
-                if is_hidden {
-                    // SCREENSHOT MODE: Solid dark #0f0f0f buffer covers mpvpaper natively
-                    let w = s.bg_width;
-                    let h = s.bg_height;
-                    let stride = (w * 4) as i32;
-
-                    if let Ok((buffer, canvas)) = s.pool.create_buffer(
-                        w as i32,
-                        h as i32,
-                        stride,
-                        wl_shm::Format::Argb8888,
-                    ) {
-                        for p in canvas.as_chunks_mut::<4>().0 {
-                            p[0] = 15;  // B (#0f)
-                            p[1] = 15;  // G (#0f)
-                            p[2] = 15;  // R (#0f)
-                            p[3] = 255; // A (opaque)
-                        }
-                        let surface = s.bg_cover_layer.wl_surface();
-                        surface.attach(Some(buffer.wl_buffer()), 0, 0);
-                        surface.damage_buffer(0, 0, w as i32, h as i32);
-                        s.bg_cover_layer.commit();
-                    }
-                } else {
-                    // NORMAL RUNNING MODE: 1x1 transparent buffer (alpha = 0)
-                    if let Ok((buffer, canvas)) = s.pool.create_buffer(1, 1, 4, wl_shm::Format::Argb8888) {
-                        canvas.fill(0);
-                        let surface = s.bg_cover_layer.wl_surface();
-                        surface.attach(Some(buffer.wl_buffer()), 0, 0);
-                        surface.damage_buffer(0, 0, 1, 1);
-                        s.bg_cover_layer.commit();
-                    }
                 }
             }
         }
@@ -672,146 +597,6 @@ pub fn run_indicator(
 
         let _ = event_queue.dispatch_pending(&mut state);
     }
-}
-
-struct BarrierState {
-    registry_state: RegistryState,
-    output_state: OutputState,
-    compositor_state: CompositorState,
-    layer_shell: LayerShell,
-    shm: Shm,
-    pool: SlotPool,
-    surface: Option<LayerSurface>,
-    configured: bool,
-    width: u32,
-    height: u32,
-}
-
-impl CompositorHandler for BarrierState {
-    fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: i32) {}
-    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {}
-    fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
-    fn surface_leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
-    fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: wayland_client::protocol::wl_output::Transform) {}
-}
-
-impl OutputHandler for BarrierState {
-    fn output_state(&mut self) -> &mut OutputState { &mut self.output_state }
-    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-}
-
-impl ShmHandler for BarrierState {
-    fn shm_state(&mut self) -> &mut Shm { &mut self.shm }
-}
-
-impl LayerShellHandler for BarrierState {
-    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {}
-    fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface, configure: LayerSurfaceConfigure, _: u32) {
-        self.configured = true;
-        self.width = configure.new_size.0;
-        self.height = configure.new_size.1;
-    }
-}
-
-impl ProvidesRegistryState for BarrierState {
-    fn registry(&mut self) -> &mut RegistryState { &mut self.registry_state }
-    registry_handlers![OutputState];
-}
-
-delegate_compositor!(BarrierState);
-delegate_output!(BarrierState);
-delegate_shm!(BarrierState);
-delegate_layer!(BarrierState);
-delegate_registry!(BarrierState);
-
-pub fn capture_with_standalone_barrier(
-    path: &str,
-    target_output: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let conn = Connection::connect_to_env()?;
-    let (globals, mut event_queue) = registry_queue_init(&conn)?;
-    let qh = event_queue.handle();
-
-    let compositor_state = CompositorState::bind(&globals, &qh)?;
-    let layer_shell = LayerShell::bind(&globals, &qh)?;
-    let shm = Shm::bind(&globals, &qh)?;
-    let pool = SlotPool::new(64 * 1024 * 1024, &shm)?;
-
-    let mut state = BarrierState {
-        registry_state: RegistryState::new(&globals),
-        output_state: OutputState::new(&globals, &qh),
-        compositor_state,
-        layer_shell,
-        shm,
-        pool,
-        surface: None,
-        configured: false,
-        width: 0,
-        height: 0,
-    };
-
-    let _ = event_queue.roundtrip(&mut state);
-
-    let outputs: Vec<wl_output::WlOutput> = state.output_state.outputs().collect();
-    let mut chosen_out = None;
-    for out in &outputs {
-        if let Some(info) = state.output_state.info(out) {
-            if info.name.as_deref() == Some(target_output) {
-                chosen_out = Some(out.clone());
-                break;
-            }
-        }
-    }
-
-    let wl_surf = state.compositor_state.create_surface(&qh);
-    let layer = state.layer_shell.create_layer_surface(
-        &qh,
-        wl_surf,
-        Layer::Bottom,
-        Some("worktrack-shot-barrier"),
-        chosen_out.as_ref(),
-    );
-    layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
-    layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-    layer.commit();
-
-    state.surface = Some(layer);
-
-    while !state.configured {
-        let _ = event_queue.blocking_dispatch(&mut state);
-    }
-
-    let (w, h) = (state.width, state.height);
-    if w > 0 && h > 0 {
-        let (buffer, canvas) = state.pool.create_buffer(w as i32, h as i32, (w * 4) as i32, wl_shm::Format::Argb8888)?;
-        for p in canvas.as_chunks_mut::<4>().0 {
-            p[0] = 15;  // B (#0f)
-            p[1] = 15;  // G (#0f)
-            p[2] = 15;  // R (#0f)
-            p[3] = 255; // A (opaque)
-        }
-        if let Some(ref s) = state.surface {
-            s.wl_surface().attach(Some(buffer.wl_buffer()), 0, 0);
-            s.wl_surface().damage_buffer(0, 0, w as i32, h as i32);
-            s.commit();
-        }
-        let _ = conn.flush();
-        let _ = event_queue.roundtrip(&mut state);
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
-    let grim = crate::niri::grim_bin();
-    let status = std::process::Command::new(grim)
-        .args(["-c", "-o", target_output, path])
-        .status()?;
-
-    if !status.success() {
-        return Err(format!("grim failed to capture output {target_output}").into());
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
