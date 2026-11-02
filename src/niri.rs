@@ -1,7 +1,6 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::process::Command;
-use std::time::Duration;
 
 #[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
@@ -130,7 +129,7 @@ pub fn get_all_workspaces() -> Result<Vec<Workspace>, Box<dyn std::error::Error>
     Ok(list)
 }
 
-fn grim_bin() -> String {
+pub fn grim_bin() -> String {
     if Command::new("grim").arg("-h").output().is_ok() {
         return "grim".to_string();
     }
@@ -340,39 +339,6 @@ pub fn get_blocked_window_rects_on_output(
     blocked_rects
 }
 
-struct WallpaperGuard {
-    service_active: bool,
-}
-
-impl WallpaperGuard {
-    fn pause() -> Self {
-        let service_active = Command::new("systemctl")
-            .args(["--user", "is-active", "--quiet", "mpvpaper.service"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-
-        if service_active {
-            let _ = Command::new("systemctl")
-                .args(["--user", "stop", "mpvpaper.service"])
-                .status();
-            std::thread::sleep(Duration::from_millis(50));
-        }
-
-        Self { service_active }
-    }
-}
-
-impl Drop for WallpaperGuard {
-    fn drop(&mut self) {
-        if self.service_active {
-            let _ = Command::new("systemctl")
-                .args(["--user", "start", "mpvpaper.service"])
-                .status();
-        }
-    }
-}
-
 /// Captures a screenshot of the specified output (or the focused output if None).
 /// Uses grim (Wayland zwlr_screencopy_manager_v1) to capture the output directly.
 /// Returns the name of the captured output.
@@ -386,9 +352,6 @@ pub fn capture_screenshot(
         .map(|s| s.to_string())
         .or_else(|| get_focused_output().map(|o| o.name))
         .ok_or("No active output found")?;
-
-    // Temporarily pause wallpaper (mpvpaper) so it does NOT appear on the screenshot
-    let _wp_guard = WallpaperGuard::pause();
 
     let mut cmd = Command::new(&grim);
     cmd.arg("-c");

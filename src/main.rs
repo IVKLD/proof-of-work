@@ -101,14 +101,7 @@ fn append_log(day_dir: &Path, msg: &str) {
     }
 }
 
-fn capture_screen(day_dir: &Path, cfg: &Config, hidden: &Arc<AtomicBool>) {
-    // 1. Temporarily hide indicator so it is NEVER present on the screenshot
-    hidden.store(true, Ordering::SeqCst);
-    let hide_file = runtime_dir().join("worktrack.hide");
-    let _ = fs::File::create(&hide_file);
-    std::thread::sleep(Duration::from_millis(50));
-
-    // 2. Take screenshot of target display
+fn capture_screen(day_dir: &Path, cfg: &Config, hidden: Option<&Arc<AtomicBool>>) {
     let now_stamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let time_str = Local::now().format("%H-%M-%S").to_string();
 
@@ -116,11 +109,36 @@ fn capture_screen(day_dir: &Path, cfg: &Config, hidden: &Arc<AtomicBool>) {
     let file_path = day_dir.join(&file_name);
     let file_str = file_path.to_string_lossy().to_string();
 
-    let res = niri::capture_screenshot(&file_str, cfg.output.as_deref());
+    let is_daemon = get_running_pid().is_some() || hidden.is_some();
 
-    // 3. Immediately restore the indicator on screen
-    hidden.store(false, Ordering::SeqCst);
-    let _ = fs::remove_file(&hide_file);
+    let res = if is_daemon {
+        // Daemon is active: trigger Layer::Bottom cover and hide indicator via worktrack.hide
+        if let Some(h) = hidden {
+            h.store(true, Ordering::SeqCst);
+        }
+        let hide_file = runtime_dir().join("worktrack.hide");
+        let _ = fs::File::create(&hide_file);
+        std::thread::sleep(Duration::from_millis(50));
+
+        let r = niri::capture_screenshot(&file_str, cfg.output.as_deref());
+
+        if let Some(h) = hidden {
+            h.store(false, Ordering::SeqCst);
+        }
+        let _ = fs::remove_file(&hide_file);
+        r
+    } else {
+        // Standalone CLI invocation (daemon not running): mount Layer::Bottom barrier directly
+        let out_name = cfg
+            .output
+            .clone()
+            .or_else(|| niri::get_focused_output().map(|o| o.name))
+            .unwrap_or_else(|| "DP-1".to_string());
+        match indicator::capture_with_standalone_barrier(&file_str, &out_name) {
+            Ok(()) => Ok(out_name),
+            Err(e) => Err(e),
+        }
+    };
 
     match res {
         Ok(out_name) => {
@@ -194,7 +212,7 @@ fn run_daemon(cfg: Config) {
             let today = Local::now().format("%Y-%m-%d").to_string();
             let day_dir = cfg.dir.join(&today);
             let _ = fs::create_dir_all(&day_dir);
-            capture_screen(&day_dir, &cfg, &hidden);
+            capture_screen(&day_dir, &cfg, Some(&hidden));
         }
 
         std::thread::sleep(Duration::from_millis(250));
@@ -291,8 +309,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let today = Local::now().format("%Y-%m-%d").to_string();
             let day_dir = cfg.dir.join(&today);
             let _ = fs::create_dir_all(&day_dir);
-            let hidden = Arc::new(AtomicBool::new(false));
-            capture_screen(&day_dir, &cfg, &hidden);
+            capture_screen(&day_dir, &cfg, None);
             let count = count_screenshots_today(&cfg.dir);
             println!("Снимок сохранён в {day_dir:?} (всего за день: {count})");
         }
