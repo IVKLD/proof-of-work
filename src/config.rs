@@ -15,7 +15,8 @@ impl Default for Config {
         Self {
             dir: PathBuf::from(home).join("worklog"),
             interval_secs: 60,
-            apps_regex: "^(kitty|firefox|code|Code|discord|vesktop|org\\.telegram\\.desktop)$".to_string(),
+            apps_regex: "^(kitty|firefox|code|Code|discord|vesktop|org\\.telegram\\.desktop)$"
+                .to_string(),
             upload_cmd: None,
         }
     }
@@ -57,10 +58,11 @@ impl Config {
         if let Ok(val) = std::env::var("WORKTRACK_DIR") {
             cfg.dir = PathBuf::from(val);
         }
-        if let Ok(val) = std::env::var("WORKTRACK_INTERVAL") {
-            if let Ok(n) = val.parse() {
-                cfg.interval_secs = n;
-            }
+        if let Some(n) = std::env::var("WORKTRACK_INTERVAL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
+            cfg.interval_secs = n;
         }
         if let Ok(val) = std::env::var("WORKTRACK_APPS") {
             cfg.apps_regex = val;

@@ -1,11 +1,11 @@
-use std::fs::File;
-use std::io::BufWriter;
-use std::path::Path;
 use ab_glyph::{FontRef, PxScale};
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::{ImageEncoder, Rgba, RgbaImage};
 use imageproc::drawing::{draw_filled_rect_mut, draw_text_mut, text_size};
 use imageproc::rect::Rect;
+use std::fs::File;
+use std::io::BufWriter;
+use std::path::Path;
 
 const FONT_DATA: &[u8] = include_bytes!("../assets/font.ttf");
 

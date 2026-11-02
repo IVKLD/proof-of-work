@@ -1,6 +1,6 @@
 use std::os::fd::{AsFd, AsRawFd};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -9,18 +9,18 @@ use smithay_client_toolkit::{
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     shell::{
+        WaylandSurface,
         wlr_layer::{
             Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
             LayerSurfaceConfigure,
         },
-        WaylandSurface,
     },
-    shm::{slot::SlotPool, Shm, ShmHandler},
+    shm::{Shm, ShmHandler, slot::SlotPool},
 };
 use wayland_client::{
+    Connection, QueueHandle,
     globals::registry_queue_init,
     protocol::{wl_output, wl_shm, wl_surface},
-    Connection, QueueHandle,
 };
 
 const WIDTH: u32 = 24;
@@ -194,19 +194,19 @@ impl IndicatorState {
                 if dist_sq <= radius_sq {
                     if dist_sq >= inner_radius_sq {
                         // Darker border
-                        canvas[offset + 0] = (b as f32 * 0.7) as u8; // B
+                        canvas[offset] = (b as f32 * 0.7) as u8; // B
                         canvas[offset + 1] = (g as f32 * 0.7) as u8; // G
                         canvas[offset + 2] = (r as f32 * 0.7) as u8; // R
                         canvas[offset + 3] = 255; // A
                     } else {
-                        canvas[offset + 0] = b;
+                        canvas[offset] = b;
                         canvas[offset + 1] = g;
                         canvas[offset + 2] = r;
                         canvas[offset + 3] = 255;
                     }
                 } else {
                     // Transparent
-                    canvas[offset + 0] = 0;
+                    canvas[offset] = 0;
                     canvas[offset + 1] = 0;
                     canvas[offset + 2] = 0;
                     canvas[offset + 3] = 0;
@@ -214,8 +214,12 @@ impl IndicatorState {
             }
         }
 
-        self.layer.wl_surface().attach(Some(buffer.wl_buffer()), 0, 0);
-        self.layer.wl_surface().damage_buffer(0, 0, WIDTH as i32, HEIGHT as i32);
+        self.layer
+            .wl_surface()
+            .attach(Some(buffer.wl_buffer()), 0, 0);
+        self.layer
+            .wl_surface()
+            .damage_buffer(0, 0, WIDTH as i32, HEIGHT as i32);
         self.layer.commit();
     }
 }
@@ -261,7 +265,9 @@ pub fn run_indicator(paused: Arc<AtomicBool>, running: Arc<AtomicBool>) {
 
     // Click-through: empty input region
     if let Ok(region) = smithay_client_toolkit::compositor::Region::new(&compositor_state) {
-        layer.wl_surface().set_input_region(Some(region.wl_region()));
+        layer
+            .wl_surface()
+            .set_input_region(Some(region.wl_region()));
     }
 
     layer.commit();

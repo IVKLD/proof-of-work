@@ -1,7 +1,7 @@
-use std::collections::HashSet;
-use std::process::Command;
 use regex::Regex;
 use serde::Deserialize;
+use std::collections::HashSet;
+use std::process::Command;
 
 #[derive(Debug, Deserialize)]
 pub struct Workspace {

@@ -1,8 +1,8 @@
+use flate2::Compression;
+use flate2::write::GzEncoder;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use flate2::write::GzEncoder;
-use flate2::Compression;
 
 pub fn pack_day(root: &Path, day: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let day_dir = root.join(day);
@@ -21,7 +21,10 @@ pub fn pack_day(root: &Path, day: &str) -> Result<PathBuf, Box<dyn std::error::E
     Ok(archive_path)
 }
 
-pub fn upload_archive(archive_path: &Path, upload_cmd: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+pub fn upload_archive(
+    archive_path: &Path,
+    upload_cmd: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let cmd_template = match upload_cmd {
         Some(c) if !c.trim().is_empty() => c,
         _ => {
@@ -37,15 +40,16 @@ pub fn upload_archive(archive_path: &Path, upload_cmd: Option<&str>) -> Result<(
     let replaced_cmd = cmd_template.replace("{file}", &full_path);
 
     println!("Выполняю команду выгрузки: {replaced_cmd}");
-    let status = Command::new("bash")
-        .arg("-c")
-        .arg(&replaced_cmd)
-        .status()?;
+    let status = Command::new("bash").arg("-c").arg(&replaced_cmd).status()?;
 
     if status.success() {
         println!("Архив успешно выгружен!");
         Ok(())
     } else {
-        Err(format!("Команда выгрузки завершилась с ошибкой: {:?}", status.code()).into())
+        Err(format!(
+            "Команда выгрузки завершилась с ошибкой: {:?}",
+            status.code()
+        )
+        .into())
     }
 }

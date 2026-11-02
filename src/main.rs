@@ -8,8 +8,8 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use chrono::Local;
@@ -19,7 +19,10 @@ use regex::Regex;
 use config::Config;
 
 #[derive(Parser)]
-#[command(name = "worktrack", about = "Time & window screenshot tracker for Wayland (niri)")]
+#[command(
+    name = "worktrack",
+    about = "Time & window screenshot tracker for Wayland (niri)"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -72,14 +75,13 @@ fn is_process_running(pid: i32) -> bool {
 
 fn get_running_pid() -> Option<i32> {
     let path = pid_file_path();
-    if let Ok(content) = fs::read_to_string(&path) {
-        if let Ok(pid) = content.trim().parse::<i32>() {
-            if is_process_running(pid) {
-                return Some(pid);
-            }
-        }
+    let content = fs::read_to_string(&path).ok()?;
+    let pid = content.trim().parse::<i32>().ok()?;
+    if is_process_running(pid) {
+        Some(pid)
+    } else {
+        None
     }
-    None
 }
 
 fn append_log(day_dir: &Path, msg: &str) {
@@ -100,7 +102,13 @@ fn capture_windows(day_dir: &Path, app_regex: &Regex) {
                 let app = w.app_id.unwrap_or_else(|| "window".to_string());
                 let clean_app: String = app
                     .chars()
-                    .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' { c } else { '_' })
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
                     .collect();
 
                 // Distinct file name using window ID prevents collisions between multiple instances
@@ -139,9 +147,7 @@ fn run_daemon(cfg: Config) {
         indicator::run_indicator(ind_paused, ind_running);
     });
 
-    let app_regex = Regex::new(&cfg.apps_regex).unwrap_or_else(|_| {
-        Regex::new("^$").unwrap()
-    });
+    let app_regex = Regex::new(&cfg.apps_regex).unwrap_or_else(|_| Regex::new("^$").unwrap());
 
     let initial_day = Local::now().format("%Y-%m-%d").to_string();
     let initial_dir = cfg.dir.join(&initial_day);
@@ -198,7 +204,7 @@ fn count_screenshots_today(dir: &Path) -> usize {
     if let Ok(entries) = fs::read_dir(day_dir) {
         entries
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "png"))
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "png"))
             .count()
     } else {
         0
@@ -207,7 +213,9 @@ fn count_screenshots_today(dir: &Path) -> usize {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Reset SIGPIPE to default so piping to `head` exits cleanly without Rust panic
-    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL); }
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
 
     let cli = Cli::parse();
     let cfg = Config::load();
@@ -278,7 +286,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let active_workspaces = niri::get_active_workspaces().unwrap_or_default();
             let windows = niri::get_all_windows()?;
 
-            println!("{:<14} {:<24} {}", "СТАТУС", "APP_ID", "TITLE");
+            println!("{:<14} {:<24} TITLE", "СТАТУС", "APP_ID");
             println!("{}", "-".repeat(70));
             for w in windows {
                 let app = w.app_id.as_deref().unwrap_or("<unknown>");
@@ -344,7 +352,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let today = Local::now().format("%Y-%m-%d").to_string();
             let archive_path = cfg.dir.join(format!("{today}.tar.gz"));
             if !archive_path.exists() {
-                return Err(format!("Архив {archive_path:?} не найден. Сначала выполните `worktrack pack`").into());
+                return Err(format!(
+                    "Архив {archive_path:?} не найден. Сначала выполните `worktrack pack`"
+                )
+                .into());
             }
             archive::upload_archive(&archive_path, cfg.upload_cmd.as_deref())?;
         }
