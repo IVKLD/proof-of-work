@@ -41,6 +41,30 @@ pub fn get_all_windows() -> Result<Vec<Window>, Box<dyn std::error::Error>> {
     Ok(windows)
 }
 
+pub fn screenshot_focused_window(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let status = Command::new("niri")
+        .args([
+            "msg",
+            "action",
+            "screenshot-window",
+            "--show-pointer",
+            "true",
+            "--write-to-disk",
+            "true",
+            "--path",
+            path,
+        ])
+        .status();
+
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        _ => {
+            // Fallback to screen capture if no window is focused
+            screenshot_screen(path)
+        }
+    }
+}
+
 pub fn screenshot_screen(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let status = Command::new("niri")
         .args([

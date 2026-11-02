@@ -105,31 +105,22 @@ fn capture_screen(day_dir: &Path, output: Option<&str>) {
     let now_stamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let time_str = Local::now().format("%H-%M-%S").to_string();
 
-    let file_name = format!("{time_str}_screen.png");
+    let file_name = format!("{time_str}.png");
     let file_path = day_dir.join(&file_name);
     let file_str = file_path.to_string_lossy().to_string();
 
-    let res = if let Some(out) = output {
+    if let Some(out) = output {
         let _ = Command::new("niri")
             .args(["msg", "action", "focus-monitor", out])
             .status();
-        if niri::screenshot_screen(&file_str).is_ok() {
-            true
-        } else {
-            Command::new("grim")
-                .args(["-o", out, &file_str])
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-        }
-    } else {
-        niri::screenshot_screen(&file_str).is_ok()
-    };
+    }
+
+    let res = niri::screenshot_focused_window(&file_str).is_ok();
 
     if res {
-        // Wait up to 500ms for compositor to finish writing PNG to disk
+        // Wait up to 1500ms for compositor to finish writing PNG to disk
         let mut stamped = false;
-        for _ in 0..10 {
+        for _ in 0..30 {
             std::thread::sleep(Duration::from_millis(50));
             if fs::metadata(&file_path).is_ok_and(|m| m.len() > 100)
                 && stamper::stamp_screenshot(&file_path, &now_stamp).is_ok()
@@ -299,7 +290,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = fs::create_dir_all(&day_dir);
             capture_screen(&day_dir, cfg.output.as_deref());
             let count = count_screenshots_today(&cfg.dir);
-            println!("Снимок экрана сохранён в {day_dir:?} (всего за день: {count})");
+            println!("Снимок сохранён в {day_dir:?} (всего за день: {count})");
         }
 
         Some(Commands::Daemon) => {
