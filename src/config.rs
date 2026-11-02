@@ -7,6 +7,7 @@ pub struct Config {
     pub interval_secs: u64,
     pub output: Option<String>,
     pub upload_cmd: Option<String>,
+    pub blocked_apps: Vec<String>,
 }
 
 fn expand_path(raw: &str) -> PathBuf {
@@ -33,6 +34,7 @@ impl Default for Config {
             interval_secs: 60,
             output: None,
             upload_cmd: None,
+            blocked_apps: Vec::new(),
         }
     }
 }
@@ -64,6 +66,13 @@ impl Config {
                                 cfg.output = Some(val.to_string());
                             }
                             "WORKTRACK_UPLOAD_CMD" => cfg.upload_cmd = Some(val.to_string()),
+                            "WORKTRACK_BLOCKED_APPS" => {
+                                cfg.blocked_apps = val
+                                    .split(',')
+                                    .map(|s| s.trim().to_lowercase())
+                                    .filter(|s| !s.is_empty())
+                                    .collect();
+                            }
                             _ => {}
                         }
                     }
@@ -89,6 +98,13 @@ impl Config {
         }
         if let Ok(val) = std::env::var("WORKTRACK_UPLOAD_CMD") {
             cfg.upload_cmd = Some(val);
+        }
+        if let Ok(val) = std::env::var("WORKTRACK_BLOCKED_APPS") {
+            cfg.blocked_apps = val
+                .split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
         }
 
         cfg

@@ -1,9 +1,6 @@
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::io::Write;
-use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::process::Command;
 
 #[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
@@ -27,6 +24,7 @@ pub struct OutputInfo {
 #[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
 pub struct WindowLayout {
+    pub pos_in_scrolling_layout: Option<[i64; 2]>,
     pub tile_size: Option<[f64; 2]>,
     pub window_size: Option<[u64; 2]>,
     pub tile_pos_in_workspace_view: Option<[f64; 2]>,
@@ -49,6 +47,25 @@ pub struct Window {
     pub id: u64,
     pub title: Option<String>,
     pub app_id: Option<String>,
+    pub workspace_id: Option<u64>,
+    #[serde(default)]
+    pub is_floating: bool,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub is_focused: bool,
+    pub layout: Option<WindowLayout>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
+pub struct Workspace {
+    pub id: u64,
+    pub idx: Option<u64>,
+    pub name: Option<String>,
+    pub output: Option<String>,
+    pub is_active: bool,
+    pub is_focused: bool,
+    pub active_window_id: Option<u64>,
 }
 
 pub fn get_focused_output() -> Option<OutputInfo> {
@@ -62,6 +79,7 @@ pub fn get_focused_output() -> Option<OutputInfo> {
     serde_json::from_slice(&output.stdout).ok()
 }
 
+#[allow(dead_code)]
 pub fn get_focused_window() -> Option<FocusedWindow> {
     let output = Command::new("niri")
         .args(["msg", "-j", "focused-window"])
@@ -99,6 +117,18 @@ pub fn get_all_windows() -> Result<Vec<Window>, Box<dyn std::error::Error>> {
     Ok(windows)
 }
 
+pub fn get_all_workspaces() -> Result<Vec<Workspace>, Box<dyn std::error::Error>> {
+    let output = Command::new("niri")
+        .args(["msg", "-j", "workspaces"])
+        .output()?;
+    if !output.status.success() {
+        return Err("niri msg workspaces failed".into());
+    }
+
+    let list: Vec<Workspace> = serde_json::from_slice(&output.stdout)?;
+    Ok(list)
+}
+
 fn grim_bin() -> String {
     if Command::new("grim").arg("-h").output().is_ok() {
         return "grim".to_string();
@@ -118,136 +148,220 @@ fn grim_bin() -> String {
     "grim".to_string()
 }
 
-#[allow(clippy::collapsible_if)]
-fn restore_clipboard(prev_mime: Option<String>, prev_data: Option<Vec<u8>>) {
-    // 1. Poll copyq for up to 250ms to see if niri placed an image in row 0.
-    // If found, delete it from history and reselect previous item.
-    // CopyQ is NEVER disabled, user copy operations remain 100% active.
-    for _ in 0..12 {
-        std::thread::sleep(Duration::from_millis(20));
-        let out = Command::new("copyq")
-            .args([
-                "eval",
-                "if (read('image/png', 0).length > 0) { remove(0); select(0); 'CLEANED'; } else { 'WAIT'; }",
-            ])
-            .output();
-        if let Ok(o) = out {
-            if String::from_utf8_lossy(&o.stdout).trim() == "CLEANED" {
+pub fn is_window_blocked(win: &Window, blocked_apps: &[String]) -> bool {
+    if blocked_apps.is_empty() {
+        return false;
+    }
+    let app_id = win.app_id.as_deref().unwrap_or("").to_lowercase();
+    let title = win.title.as_deref().unwrap_or("").to_lowercase();
+
+    for blocked in blocked_apps {
+        let b = blocked.trim().to_lowercase();
+        if b.is_empty() {
+            continue;
+        }
+        if app_id.contains(&b) || title.contains(&b) {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn get_blocked_window_rects_on_output(
+    target_output: &str,
+    blocked_apps: &[String],
+) -> Vec<[u32; 4]> {
+    if blocked_apps.is_empty() {
+        return Vec::new();
+    }
+
+    let outputs = match get_all_outputs() {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    let out_info = match outputs.into_iter().find(|o| o.name == target_output) {
+        Some(o) => o,
+        None => return Vec::new(),
+    };
+    let logical = match out_info.logical {
+        Some(l) => l,
+        None => return Vec::new(),
+    };
+    let mon_w = logical.width as f64;
+    let mon_h = logical.height as f64;
+
+    let workspaces = match get_all_workspaces() {
+        Ok(w) => w,
+        Err(_) => return Vec::new(),
+    };
+    let active_ws = match workspaces
+        .into_iter()
+        .find(|w| w.output.as_deref() == Some(target_output) && w.is_active)
+    {
+        Some(w) => w,
+        None => return Vec::new(),
+    };
+
+    let all_windows = match get_all_windows() {
+        Ok(w) => w,
+        Err(_) => return Vec::new(),
+    };
+
+    let ws_windows: Vec<Window> = all_windows
+        .into_iter()
+        .filter(|w| w.workspace_id == Some(active_ws.id))
+        .collect();
+
+    let gap = 8.0f64;
+    let mut blocked_rects = Vec::new();
+
+    // 1. Check floating windows
+    for win in ws_windows.iter().filter(|w| w.is_floating) {
+        if !is_window_blocked(win, blocked_apps) {
+            continue;
+        }
+        if let Some(ref layout) = win.layout {
+            let (fx, fy) = if let Some(pos) = layout.tile_pos_in_workspace_view {
+                (pos[0], pos[1])
+            } else {
+                (gap, gap)
+            };
+            let (w, h) = if let Some(size) = layout.window_size {
+                (size[0] as f64, size[1] as f64)
+            } else {
+                (800.0, 600.0)
+            };
+
+            let x0 = fx.max(0.0) as u32;
+            let y0 = fy.max(0.0) as u32;
+            let x1 = (fx + w).min(mon_w).max(0.0) as u32;
+            let y1 = (fy + h).min(mon_h).max(0.0) as u32;
+            if x1 > x0 && y1 > y0 {
+                blocked_rects.push([x0, y0, x1 - x0, y1 - y0]);
+            }
+        }
+    }
+
+    // 2. Check tiled windows in scrolling layout
+    let tiled_windows: Vec<&Window> = ws_windows.iter().filter(|w| !w.is_floating).collect();
+    if tiled_windows.is_empty() {
+        return blocked_rects;
+    }
+
+    // Group by column
+    let mut cols: HashMap<i64, Vec<&Window>> = HashMap::new();
+    for win in &tiled_windows {
+        let col = win
+            .layout
+            .as_ref()
+            .and_then(|l| l.pos_in_scrolling_layout)
+            .map(|p| p[0])
+            .unwrap_or(1);
+        cols.entry(col).or_default().push(win);
+    }
+
+    let mut sorted_cols: Vec<i64> = cols.keys().copied().collect();
+    sorted_cols.sort_unstable();
+
+    // Calculate column X positions and widths
+    let mut col_x: HashMap<i64, f64> = HashMap::new();
+    let mut col_w: HashMap<i64, f64> = HashMap::new();
+    let mut cur_x = gap;
+
+    for &c in &sorted_cols {
+        let w_list = &cols[&c];
+        let cw = w_list
+            .iter()
+            .filter_map(|w| w.layout.as_ref()?.tile_size.map(|s| s[0]))
+            .fold(mon_w - 2.0 * gap, f64::max);
+        col_x.insert(c, cur_x);
+        col_w.insert(c, cw);
+        cur_x += cw + gap;
+    }
+
+    // Find active column
+    let mut active_col = sorted_cols.first().copied().unwrap_or(1);
+    if let Some(act_id) = active_ws.active_window_id {
+        for (&c, w_list) in &cols {
+            if w_list.iter().any(|w| w.id == act_id) {
+                active_col = c;
                 break;
             }
         }
     }
 
-    // 2. If wl-paste still has image/png (e.g. copyq not running or not used),
-    // restore the user's prior clipboard selection or clear it.
-    let current_mime = Command::new("wl-paste")
-        .arg("-l")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .unwrap_or_default();
-
-    if current_mime.contains("image/png") {
-        if let (Some(mime), Some(data)) = (prev_mime, prev_data) {
-            if let Ok(mut child) = Command::new("wl-copy")
-                .args(["--type", &mime])
-                .stdin(Stdio::piped())
-                .spawn()
-            {
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(&data);
-                }
-                let _ = child.wait();
-            }
-        } else {
-            let _ = Command::new("wl-copy").arg("--clear").status();
+    // Compute scroll_x (minimal scroll to keep active column on screen)
+    let mut scroll_x = 0.0f64;
+    if let (Some(&c_left), Some(&cw)) = (col_x.get(&active_col), col_w.get(&active_col)) {
+        let c_right = c_left + cw;
+        if c_right > mon_w - gap {
+            scroll_x = c_right - (mon_w - gap);
         }
     }
+
+    // Check each window
+    for &c in &sorted_cols {
+        let scr_x = col_x[&c] - scroll_x;
+        let mut w_list = cols[&c].clone();
+        w_list.sort_by_key(|w| {
+            w.layout
+                .as_ref()
+                .and_then(|l| l.pos_in_scrolling_layout)
+                .map(|p| p[1])
+                .unwrap_or(1)
+        });
+
+        let mut cur_y = gap;
+        for w in w_list {
+            let (win_w, win_h) = if let Some(ref l) = w.layout {
+                let ts = l.tile_size.unwrap_or([col_w[&c], mon_h - 2.0 * gap]);
+                (ts[0], ts[1])
+            } else {
+                (col_w[&c], mon_h - 2.0 * gap)
+            };
+
+            let is_blocked = is_window_blocked(w, blocked_apps);
+            if is_blocked {
+                let x0 = scr_x.max(0.0) as u32;
+                let y0 = cur_y.max(0.0) as u32;
+                let x1 = (scr_x + win_w).min(mon_w).max(0.0) as u32;
+                let y1 = (cur_y + win_h).min(mon_h).max(0.0) as u32;
+
+                if x1 > x0 && y1 > y0 {
+                    blocked_rects.push([x0, y0, x1 - x0, y1 - y0]);
+                }
+            }
+
+            cur_y += win_h + gap;
+        }
+    }
+
+    blocked_rects
 }
 
-/// Captures a screenshot of the current work.
-///
-/// First attempts window surface capture via niri action screenshot-window to guarantee:
-/// - 0% wallpaper (mpvpaper / desktop background)
-/// - 0% desktop gaps
-/// - 0% layer-shell indicators
-///
-/// Immediately cleans up clipboard and copyq so user's clipboard is NEVER overwritten or disabled.
-#[allow(clippy::collapsible_if)]
+/// Captures a screenshot of the specified output (or the focused output if None).
+/// Uses grim (Wayland zwlr_screencopy_manager_v1) to capture the output directly.
+/// Returns the name of the captured output.
+/// NEVER touches or modifies the Wayland clipboard or CopyQ history.
 pub fn capture_screenshot(
     path: &str,
     target_output: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Prefer focused window surface capture (no wallpaper, no desktop gaps, no indicator)
-    if let Some(win) = get_focused_window() {
-        let prev_mime = Command::new("wl-paste")
-            .arg("-l")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.lines().next().unwrap_or("").to_string())
-            .filter(|s| !s.is_empty());
-
-        let prev_data = if let Some(ref mime) = prev_mime {
-            Command::new("wl-paste")
-                .args(["--type", mime, "--no-newline"])
-                .output()
-                .ok()
-                .filter(|o| o.status.success() && !o.stdout.is_empty())
-                .map(|o| o.stdout)
-        } else {
-            None
-        };
-
-        let status = Command::new("niri")
-            .args([
-                "msg",
-                "action",
-                "screenshot-window",
-                "--id",
-                &win.id.to_string(),
-                "--write-to-disk",
-                "true",
-                "--path",
-                path,
-            ])
-            .status();
-
-        restore_clipboard(prev_mime, prev_data);
-
-        if let Ok(s) = status {
-            if s.success() {
-                let p = Path::new(path);
-                for _ in 0..25 {
-                    if p.is_file() && std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false) {
-                        return Ok(());
-                    }
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                if p.is_file() {
-                    return Ok(());
-                }
-            }
-        }
-    }
-
-    // 2. Fallback to capturing the focused or targeted output via grim
+) -> Result<String, Box<dyn std::error::Error>> {
     let grim = grim_bin();
     let out_name = target_output
         .map(|s| s.to_string())
-        .or_else(|| get_focused_output().map(|o| o.name));
+        .or_else(|| get_focused_output().map(|o| o.name))
+        .ok_or("No active output found")?;
 
     let mut cmd = Command::new(&grim);
     cmd.arg("-c");
-    if let Some(name) = &out_name {
-        cmd.args(["-o", name]);
-    }
+    cmd.args(["-o", &out_name]);
     cmd.arg(path);
 
     let status = cmd.status()?;
     if status.success() {
-        Ok(())
+        Ok(out_name)
     } else {
-        Err("grim failed to capture screenshot".into())
+        Err(format!("grim failed to capture output {out_name}").into())
     }
 }

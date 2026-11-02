@@ -8,11 +8,26 @@ use std::path::Path;
 
 const FONT_DATA: &[u8] = include_bytes!("../assets/font.ttf");
 
-pub fn stamp_screenshot(path: &Path, text: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn stamp_screenshot(
+    path: &Path,
+    text: &str,
+    blocked_rects: &[[u32; 4]],
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut img: RgbaImage = image::open(path)?.to_rgba8();
     let (width, height) = img.dimensions();
 
-    // Ensure fully opaque (alpha = 255) for all pixels so semi-transparent windows
+    // 1. Black out all forbidden application windows
+    for &[bx, by, bw, bh] in blocked_rects {
+        let max_x = (bx + bw).min(width);
+        let max_y = (by + bh).min(height);
+        for y in by..max_y {
+            for x in bx..max_x {
+                img.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+            }
+        }
+    }
+
+    // 2. Ensure fully opaque (alpha = 255) for all pixels so semi-transparent windows
     // (e.g. Kitty terminal with background_opacity 0.8) are rendered as solid opaque surfaces
     // without any transparency or wallpaper showing through.
     for p in img.pixels_mut() {
@@ -77,7 +92,7 @@ mod tests {
         let img = RgbaImage::new(400, 200);
         let path = std::env::temp_dir().join("test_stamp.png");
         img.save(&path).unwrap();
-        stamp_screenshot(&path, "2026-11-02 21:45:00").unwrap();
+        stamp_screenshot(&path, "2026-11-02 21:45:00", &[]).unwrap();
         let stamped = image::open(&path).unwrap().to_rgba8();
         let mut non_black = 0;
         for p in stamped.pixels() {
@@ -87,6 +102,23 @@ mod tests {
         }
         println!("Non-black pixels: {non_black}");
         assert!(non_black > 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_blocked_blackout() {
+        let mut img = RgbaImage::new(400, 200);
+        for p in img.pixels_mut() {
+            *p = Rgba([255, 255, 255, 255]); // white
+        }
+        let path = std::env::temp_dir().join("test_blackout.png");
+        img.save(&path).unwrap();
+        stamp_screenshot(&path, "2026-11-02 21:45:00", &[[50, 50, 100, 100]]).unwrap();
+        let stamped = image::open(&path).unwrap().to_rgba8();
+        // Check pixel inside blackout rect
+        assert_eq!(stamped.get_pixel(60, 60), &Rgba([0, 0, 0, 255]));
+        // Check pixel outside blackout rect
+        assert_eq!(stamped.get_pixel(10, 10), &Rgba([255, 255, 255, 255]));
         let _ = std::fs::remove_file(path);
     }
 }

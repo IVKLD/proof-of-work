@@ -101,14 +101,14 @@ fn append_log(day_dir: &Path, msg: &str) {
     }
 }
 
-fn capture_screen(day_dir: &Path, output: Option<&str>, hidden: &Arc<AtomicBool>) {
+fn capture_screen(day_dir: &Path, cfg: &Config, hidden: &Arc<AtomicBool>) {
     // 1. Temporarily hide indicator so it is NEVER present on the screenshot
     hidden.store(true, Ordering::SeqCst);
     let hide_file = runtime_dir().join("worktrack.hide");
     let _ = fs::File::create(&hide_file);
     std::thread::sleep(Duration::from_millis(50));
 
-    // 2. Take screenshot
+    // 2. Take screenshot of target display
     let now_stamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let time_str = Local::now().format("%H-%M-%S").to_string();
 
@@ -116,18 +116,23 @@ fn capture_screen(day_dir: &Path, output: Option<&str>, hidden: &Arc<AtomicBool>
     let file_path = day_dir.join(&file_name);
     let file_str = file_path.to_string_lossy().to_string();
 
-    let res = niri::capture_screenshot(&file_str, output).is_ok();
+    let res = niri::capture_screenshot(&file_str, cfg.output.as_deref());
 
     // 3. Immediately restore the indicator on screen
     hidden.store(false, Ordering::SeqCst);
     let _ = fs::remove_file(&hide_file);
 
-    if res {
-        if stamper::stamp_screenshot(&file_path, &now_stamp).is_err() {
-            append_log(day_dir, &format!("WARN: could not stamp {file_name}"));
+    match res {
+        Ok(out_name) => {
+            let blocked_rects =
+                niri::get_blocked_window_rects_on_output(&out_name, &cfg.blocked_apps);
+            if stamper::stamp_screenshot(&file_path, &now_stamp, &blocked_rects).is_err() {
+                append_log(day_dir, &format!("WARN: could not stamp {file_name}"));
+            }
         }
-    } else {
-        append_log(day_dir, "ERROR: failed to take screenshot");
+        Err(err) => {
+            append_log(day_dir, &format!("ERROR: screenshot failed: {err}"));
+        }
     }
 }
 
@@ -187,7 +192,7 @@ fn run_daemon(cfg: Config) {
 
         if !is_paused && last_capture.elapsed() >= Duration::from_secs(cfg.interval_secs) {
             last_capture = std::time::Instant::now();
-            capture_screen(&day_dir, cfg.output.as_deref(), &hidden);
+            capture_screen(&day_dir, &cfg, &hidden);
         }
 
         std::thread::sleep(Duration::from_millis(250));
@@ -285,7 +290,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let day_dir = cfg.dir.join(&today);
             let _ = fs::create_dir_all(&day_dir);
             let hidden = Arc::new(AtomicBool::new(false));
-            capture_screen(&day_dir, cfg.output.as_deref(), &hidden);
+            capture_screen(&day_dir, &cfg, &hidden);
             let count = count_screenshots_today(&cfg.dir);
             println!("Снимок сохранён в {day_dir:?} (всего за день: {count})");
         }
