@@ -1,0 +1,20 @@
+[package]
+name = "worktrack"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ab_glyph = "0.2"
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+ctrlc = "3.4"
+flate2 = "1.0"
+image = { version = "0.25", default-features = false, features = ["png"] }
+imageproc = "0.25"
+libc = "0.2"
+regex = "1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+smithay-client-toolkit = { version = "0.19", default-features = false }
+tar = "0.4"
+wayland-client = "0.31"
