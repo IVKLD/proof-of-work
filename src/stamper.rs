@@ -35,12 +35,13 @@ pub fn stamp_screenshot(
     }
 
     let font = FontRef::try_from_slice(FONT_DATA)?;
-    let scale = PxScale::from(22.0);
+    let font_size = if height >= 2000 { 36.0 } else if height >= 1400 { 28.0 } else { 22.0 };
+    let scale = PxScale::from(font_size);
 
     let (text_w, text_h) = text_size(scale, &font, text);
 
-    let margin_x = 12i32;
-    let margin_y = 12i32;
+    let margin_x = if height >= 2000 { 20i32 } else { 12i32 };
+    let margin_y = margin_x;
 
     let text_pos_x = margin_x;
     let text_pos_y = (height as i32) - margin_y - (text_h as i32);

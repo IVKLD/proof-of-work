@@ -283,7 +283,7 @@ impl IndicatorState {
             .and_then(|o| self.output_state.info(o))
             .and_then(|i| i.name);
 
-        let pool = SlotPool::new(16 * 1024 * 1024, &self.shm)
+        let pool = SlotPool::new(1024 * 1024, &self.shm)
             .expect("Failed to create shm slot pool for monitor");
 
         self.surfaces.push(MonitorSurface {
@@ -299,11 +299,7 @@ impl IndicatorState {
 
     pub fn draw_all(&mut self) {
         let is_paused = self.paused.load(Ordering::Relaxed);
-        let hide_file = std::env::var("XDG_RUNTIME_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
-            .join("worktrack.hide");
-        let is_hidden = self.hidden.load(Ordering::Relaxed) || hide_file.exists();
+        let is_hidden = self.hidden.load(Ordering::Relaxed);
         let remaining = self.countdown.load(Ordering::Relaxed);
         let work_rem = self.work_remaining.load(Ordering::Relaxed);
         let current_target = self.target_output.read().ok().and_then(|g| g.clone());
@@ -574,13 +570,8 @@ pub fn run_indicator(
     // 3. Third roundtrip to acknowledge layer surface configuration
     let _ = event_queue.roundtrip(&mut state);
 
-    let hide_file = std::env::var("XDG_RUNTIME_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
-        .join("worktrack.hide");
-
     let mut last_paused = state.paused.load(Ordering::Relaxed);
-    let mut last_hidden = state.hidden.load(Ordering::Relaxed) || hide_file.exists();
+    let mut last_hidden = state.hidden.load(Ordering::Relaxed);
     let mut last_countdown = state.countdown.load(Ordering::Relaxed);
     let mut last_work_rem = state.work_remaining.load(Ordering::Relaxed);
     let mut last_target = state.target_output.read().ok().and_then(|g| g.clone());
@@ -590,7 +581,7 @@ pub fn run_indicator(
         let _ = event_queue.dispatch_pending(&mut state);
 
         let current_paused = state.paused.load(Ordering::Relaxed);
-        let current_hidden = state.hidden.load(Ordering::Relaxed) || hide_file.exists();
+        let current_hidden = state.hidden.load(Ordering::Relaxed);
         let current_countdown = state.countdown.load(Ordering::Relaxed);
         let current_work_rem = state.work_remaining.load(Ordering::Relaxed);
         let current_target = state.target_output.read().ok().and_then(|g| g.clone());

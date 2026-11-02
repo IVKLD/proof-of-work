@@ -194,8 +194,6 @@ fn capture_screen(
     // 2. Perform capture (briefly hide indicator badge so it does not appear on screenshot)
     if let Some(h) = hidden {
         h.store(true, Ordering::SeqCst);
-        let hide_file = runtime_dir().join("worktrack.hide");
-        let _ = fs::File::create(&hide_file);
         std::thread::sleep(Duration::from_millis(50));
     }
 
@@ -203,8 +201,6 @@ fn capture_screen(
 
     if let Some(h) = hidden {
         h.store(false, Ordering::SeqCst);
-        let hide_file = runtime_dir().join("worktrack.hide");
-        let _ = fs::remove_file(&hide_file);
     }
 
     // 3. Restore previous workspace/window if we switched
