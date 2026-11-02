@@ -1,84 +1,44 @@
 use serde::Deserialize;
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::collections::HashMap;
+use std::process::Command;
 
-struct ClipboardBackup {
-    mime_type: Option<String>,
-    data: Vec<u8>,
-    had_copyq: bool,
+#[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
+pub struct LogicalOutput {
+    pub x: i64,
+    pub y: i64,
+    pub width: u64,
+    pub height: u64,
+    pub scale: Option<f64>,
 }
 
-impl ClipboardBackup {
-    fn capture() -> Self {
-        let had_copyq = Command::new("copyq")
-            .arg("disable")
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+#[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
+pub struct OutputInfo {
+    pub name: String,
+    pub make: Option<String>,
+    pub model: Option<String>,
+    pub logical: Option<LogicalOutput>,
+}
 
-        let mime = Command::new("wl-paste")
-            .arg("--list-types")
-            .output()
-            .ok()
-            .and_then(|out| {
-                if out.status.success() {
-                    String::from_utf8(out.stdout).ok().and_then(|s| {
-                        s.lines()
-                            .map(|l| l.trim().to_string())
-                            .find(|l| !l.is_empty() && !l.starts_with("image/"))
-                            .or_else(|| s.lines().next().map(|l| l.trim().to_string()))
-                    })
-                } else {
-                    None
-                }
-            });
+#[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
+pub struct WindowLayout {
+    pub tile_size: Option<[f64; 2]>,
+    pub window_size: Option<[u64; 2]>,
+    pub tile_pos_in_workspace_view: Option<[f64; 2]>,
+    pub window_offset_in_tile: Option<[f64; 2]>,
+}
 
-        let data = if let Some(m) = &mime {
-            Command::new("wl-paste")
-                .args(["--no-newline", "--type", m])
-                .output()
-                .ok()
-                .map(|out| out.stdout)
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-
-        Self {
-            mime_type: mime,
-            data,
-            had_copyq,
-        }
-    }
-
-    fn restore(self) {
-        // Give Niri compositor 200ms to complete its async clipboard write before we restore
-        std::thread::sleep(std::time::Duration::from_millis(200));
-
-        if let Some(m) = self.mime_type {
-            if !self.data.is_empty() {
-                if let Ok(mut child) = Command::new("wl-copy")
-                    .args(["--type", &m])
-                    .stdin(Stdio::piped())
-                    .spawn()
-                {
-                    if let Some(mut stdin) = child.stdin.take() {
-                        let _ = stdin.write_all(&self.data);
-                    }
-                    let _ = child.wait();
-                }
-            } else {
-                let _ = Command::new("wl-copy").arg("--clear").status();
-            }
-        } else {
-            let _ = Command::new("wl-copy").arg("--clear").status();
-        }
-
-        if self.had_copyq {
-            let _ = Command::new("copyq").arg("enable").status();
-            let _ = Command::new("copyq").args(["select", "0"]).status();
-        }
-    }
+#[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
+pub struct FocusedWindow {
+    pub id: u64,
+    pub title: Option<String>,
+    pub app_id: Option<String>,
+    pub workspace_id: Option<u64>,
+    pub is_floating: bool,
+    pub layout: Option<WindowLayout>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -88,11 +48,26 @@ pub struct Window {
     pub app_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct OutputInfo {
-    pub name: String,
-    pub make: Option<String>,
-    pub model: Option<String>,
+pub fn get_focused_output() -> Option<OutputInfo> {
+    let output = Command::new("niri")
+        .args(["msg", "-j", "focused-output"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&output.stdout).ok()
+}
+
+pub fn get_focused_window() -> Option<FocusedWindow> {
+    let output = Command::new("niri")
+        .args(["msg", "-j", "focused-window"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&output.stdout).ok()
 }
 
 pub fn get_all_outputs() -> Result<Vec<OutputInfo>, Box<dyn std::error::Error>> {
@@ -103,7 +78,7 @@ pub fn get_all_outputs() -> Result<Vec<OutputInfo>, Box<dyn std::error::Error>> 
         return Err("niri msg outputs failed".into());
     }
 
-    let map: std::collections::HashMap<String, OutputInfo> = serde_json::from_slice(&output.stdout)?;
+    let map: HashMap<String, OutputInfo> = serde_json::from_slice(&output.stdout)?;
     let mut list: Vec<OutputInfo> = map.into_values().collect();
     list.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(list)
@@ -121,57 +96,83 @@ pub fn get_all_windows() -> Result<Vec<Window>, Box<dyn std::error::Error>> {
     Ok(windows)
 }
 
-pub fn screenshot_focused_window(path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let backup = ClipboardBackup::capture();
-    let status = Command::new("niri")
-        .args([
-            "msg",
-            "action",
-            "screenshot-window",
-            "--show-pointer",
-            "true",
-            "--write-to-disk",
-            "true",
-            "--path",
-            path,
-        ])
-        .status();
-    backup.restore();
-
-    match status {
-        Ok(s) if s.success() => Ok(()),
-        _ => {
-            // Fallback to screen capture if no window is focused
-            screenshot_screen(path)
-        }
+fn grim_bin() -> String {
+    if Command::new("grim").arg("-h").output().is_ok() {
+        return "grim".to_string();
     }
-}
-
-pub fn screenshot_screen(path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let backup = ClipboardBackup::capture();
-    let status = Command::new("niri")
-        .args([
-            "msg",
-            "action",
-            "screenshot-screen",
-            "--write-to-disk",
-            "true",
-            "--path",
-            path,
-        ])
-        .status();
-    backup.restore();
-
-    match status {
-        Ok(s) if s.success() => Ok(()),
-        _ => {
-            // Fallback to grim if niri command fails
-            let g_status = Command::new("grim").arg(path).status()?;
-            if g_status.success() {
-                Ok(())
-            } else {
-                Err("failed to take screen screenshot with niri or grim".into())
+    if let Ok(entries) = std::fs::read_dir("/nix/store") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if name.contains("-grim-") {
+                let bin = path.join("bin/grim");
+                if bin.is_file() {
+                    return bin.to_string_lossy().to_string();
+                }
             }
         }
+    }
+    "grim".to_string()
+}
+
+/// Captures a screenshot purely via grim (Wayland zwlr_screencopy_manager_v1).
+/// NEVER touches or uses the Wayland clipboard under any circumstance.
+#[allow(clippy::collapsible_if)]
+pub fn capture_screenshot(
+    path: &str,
+    target_output: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let grim = grim_bin();
+
+    // 1. Try to crop to focused window geometry (no wallpapers, no background)
+    if let (Some(win), Some(out)) = (get_focused_window(), get_focused_output()) {
+        if let (Some(layout), Some(logical)) = (win.layout, out.logical) {
+            if let Some(wsize) = layout.window_size {
+                let (w, h) = (wsize[0], wsize[1]);
+                let (x, y) = if win.is_floating {
+                    if let Some(pos) = layout.tile_pos_in_workspace_view {
+                        (logical.x + pos[0] as i64, logical.y + pos[1] as i64)
+                    } else {
+                        (logical.x, logical.y)
+                    }
+                } else if let Some(tsize) = layout.tile_size {
+                    let gap_x = ((logical.width as f64 - tsize[0]) / 2.0).max(0.0) as i64;
+                    let gap_y = ((logical.height as f64 - tsize[1]) / 2.0).max(0.0) as i64;
+                    (logical.x + gap_x, logical.y + gap_y)
+                } else {
+                    (logical.x, logical.y)
+                };
+
+                let geom = format!("{x},{y} {w}x{h}");
+                let status = Command::new(&grim)
+                    .args(["-c", "-g", &geom, path])
+                    .status();
+
+                if let Ok(s) = status {
+                    if s.success() {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Fallback to capturing the focused or targeted output via grim
+    let out_name = target_output
+        .map(|s| s.to_string())
+        .or_else(|| get_focused_output().map(|o| o.name));
+
+    let mut cmd = Command::new(&grim);
+    cmd.arg("-c");
+    if let Some(name) = &out_name {
+        cmd.args(["-o", name]);
+    }
+    cmd.arg(path);
+
+    let status = cmd.status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("grim failed to capture screenshot".into())
     }
 }

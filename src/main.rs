@@ -109,31 +109,14 @@ fn capture_screen(day_dir: &Path, output: Option<&str>) {
     let file_path = day_dir.join(&file_name);
     let file_str = file_path.to_string_lossy().to_string();
 
-    if let Some(out) = output {
-        let _ = Command::new("niri")
-            .args(["msg", "action", "focus-monitor", out])
-            .status();
-    }
-
-    let res = niri::screenshot_focused_window(&file_str).is_ok();
+    let res = niri::capture_screenshot(&file_str, output).is_ok();
 
     if res {
-        // Wait up to 1500ms for compositor to finish writing PNG to disk
-        let mut stamped = false;
-        for _ in 0..30 {
-            std::thread::sleep(Duration::from_millis(50));
-            if fs::metadata(&file_path).is_ok_and(|m| m.len() > 100)
-                && stamper::stamp_screenshot(&file_path, &now_stamp).is_ok()
-            {
-                stamped = true;
-                break;
-            }
-        }
-        if !stamped {
+        if stamper::stamp_screenshot(&file_path, &now_stamp).is_err() {
             append_log(day_dir, &format!("WARN: could not stamp {file_name}"));
         }
     } else {
-        append_log(day_dir, "ERROR: failed to take screen screenshot");
+        append_log(day_dir, "ERROR: failed to take screenshot");
     }
 }
 

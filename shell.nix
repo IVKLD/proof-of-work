@@ -7,6 +7,7 @@ pkgs.mkShell {
     clippy
     pkg-config
     wayland
+    grim
   ];
   shellHook = ''
     export PATH="$PWD/target/release:$PWD/target/debug:$PATH"

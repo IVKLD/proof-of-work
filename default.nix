@@ -6,6 +6,7 @@
 , installShellFiles
 , bash
 , coreutils
+, grim
 }:
 
 rustPlatform.buildRustPackage {
@@ -34,7 +35,7 @@ rustPlatform.buildRustPackage {
       --fish <($out/bin/worktrack completions fish)
 
     wrapProgram $out/bin/worktrack \
-      --prefix PATH : ${lib.makeBinPath [ bash coreutils ]}
+      --prefix PATH : ${lib.makeBinPath [ bash coreutils grim ]}
   '';
 
   meta = with lib; {
