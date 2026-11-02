@@ -13,7 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use chrono::Local;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{Shell, generate};
 use regex::Regex;
 
 use config::Config;
@@ -48,6 +49,11 @@ enum Commands {
     Pack,
     /// Выгрузить архив за сегодняшний день
     Upload,
+    /// Сгенерировать автодополнение для терминала (bash, zsh, fish)
+    Completions {
+        /// Оболочка: bash, zsh, fish, elvish, powershell
+        shell: Shell,
+    },
 }
 
 fn runtime_dir() -> PathBuf {
@@ -211,6 +217,25 @@ fn run_daemon(cfg: Config) {
     let _ = ind_thread.join();
 }
 
+fn print_status(cfg: &Config) {
+    let pid = get_running_pid();
+    match pid {
+        Some(p) => {
+            let paused = pause_file_path().exists();
+            if paused {
+                println!("Статус: НА ПАУЗЕ (PID {p})");
+            } else {
+                println!("Статус: РАБОТАЕТ (PID {p})");
+            }
+        }
+        None => {
+            println!("Статус: ОСТАНОВЛЕН");
+        }
+    }
+    let count = count_screenshots_today(&cfg.dir);
+    println!("Скриншотов за сегодня: {count}");
+}
+
 fn count_screenshots_today(dir: &Path) -> usize {
     let today = Local::now().format("%Y-%m-%d").to_string();
     let day_dir = dir.join(today);
@@ -233,8 +258,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let cfg = Config::load();
 
-    match cli.command.unwrap_or(Commands::Status) {
-        Commands::Start => {
+    match cli.command {
+        None => {
+            print_status(&cfg);
+            println!(
+                "\nДоступные команды: worktrack <start|pause|resume|status|windows|stop|pack|upload|completions>"
+            );
+            println!("Подробная справка по аргументам: worktrack --help");
+        }
+
+        Some(Commands::Start) => {
             if let Some(pid) = get_running_pid() {
                 println!("Трекер уже запущен (PID {pid})");
                 return Ok(());
@@ -262,11 +295,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Трекер запущен (PID {})", child.id());
         }
 
-        Commands::Daemon => {
+        Some(Commands::Daemon) => {
             run_daemon(cfg);
         }
 
-        Commands::Pause => {
+        Some(Commands::Pause) => {
             if get_running_pid().is_none() {
                 println!("Трекер не запущен");
                 return Ok(());
@@ -275,7 +308,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Трекер поставлен на паузу (индикатор жёлтый)");
         }
 
-        Commands::Resume => {
+        Some(Commands::Resume) => {
             if get_running_pid().is_none() {
                 println!("Трекер не запущен");
                 return Ok(());
@@ -284,26 +317,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Трекер снят с паузы (индикатор красный)");
         }
 
-        Commands::Status => {
-            let pid = get_running_pid();
-            match pid {
-                Some(p) => {
-                    let paused = pause_file_path().exists();
-                    if paused {
-                        println!("Статус: НА ПАУЗЕ (PID {p})");
-                    } else {
-                        println!("Статус: РАБОТАЕТ (PID {p})");
-                    }
-                }
-                None => {
-                    println!("Статус: ОСТАНОВЛЕН");
-                }
-            }
-            let count = count_screenshots_today(&cfg.dir);
-            println!("Скриншотов за сегодня: {count}");
+        Some(Commands::Status) => {
+            print_status(&cfg);
         }
 
-        Commands::Windows => {
+        Some(Commands::Completions { shell }) => {
+            let mut cmd = Cli::command();
+            let bin_name = cmd.get_name().to_string();
+            generate(shell, &mut cmd, bin_name, &mut std::io::stdout());
+        }
+
+        Some(Commands::Windows) => {
             let app_regex = Regex::new(&cfg.apps_regex)?;
             let active_workspaces = niri::get_active_workspaces().unwrap_or_default();
             let windows = niri::get_all_windows()?;
@@ -330,7 +354,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Commands::Stop => {
+        Some(Commands::Stop) => {
             if let Some(pid) = get_running_pid() {
                 println!("Останавливаю процесс (PID {pid})...");
                 unsafe { libc::kill(pid, libc::SIGTERM) };
@@ -362,7 +386,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Commands::Pack => {
+        Some(Commands::Pack) => {
             let today = Local::now().format("%Y-%m-%d").to_string();
             let archive_path = archive::pack_day(&cfg.dir, &today)?;
             let count = count_screenshots_today(&cfg.dir);
@@ -370,7 +394,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = archive::upload_archive(&archive_path, cfg.upload_cmd.as_deref());
         }
 
-        Commands::Upload => {
+        Some(Commands::Upload) => {
             let today = Local::now().format("%Y-%m-%d").to_string();
             let archive_path = cfg.dir.join(format!("{today}.tar.gz"));
             if !archive_path.exists() {

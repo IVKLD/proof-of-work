@@ -3,6 +3,7 @@
 , pkg-config
 , wayland
 , makeWrapper
+, installShellFiles
 , bash
 , coreutils
 }:
@@ -19,6 +20,7 @@ rustPlatform.buildRustPackage {
   nativeBuildInputs = [
     pkg-config
     makeWrapper
+    installShellFiles
   ];
 
   buildInputs = [
@@ -26,6 +28,11 @@ rustPlatform.buildRustPackage {
   ];
 
   postInstall = ''
+    installShellCompletion --cmd worktrack \
+      --bash <($out/bin/worktrack completions bash) \
+      --zsh <($out/bin/worktrack completions zsh) \
+      --fish <($out/bin/worktrack completions fish)
+
     wrapProgram $out/bin/worktrack \
       --prefix PATH : ${lib.makeBinPath [ bash coreutils ]}
   '';

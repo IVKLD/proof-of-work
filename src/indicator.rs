@@ -23,19 +23,25 @@ use wayland_client::{
     protocol::{wl_output, wl_shm, wl_surface},
 };
 
-const WIDTH: u32 = 24;
-const HEIGHT: u32 = 24;
+const LOGICAL_SIZE: u32 = 28;
+
+pub struct MonitorSurface {
+    pub layer: LayerSurface,
+    pub scale: i32,
+    pub configured: bool,
+}
 
 pub struct IndicatorState {
     pub registry_state: RegistryState,
     pub output_state: OutputState,
-    pub _compositor_state: CompositorState,
+    pub compositor_state: CompositorState,
+    pub layer_shell: LayerShell,
     pub shm: Shm,
     pub pool: SlotPool,
-    pub layer: LayerSurface,
+    pub surfaces: Vec<MonitorSurface>,
+    pub qh: QueueHandle<IndicatorState>,
     pub paused: Arc<AtomicBool>,
     pub running: Arc<AtomicBool>,
-    pub configured: bool,
 }
 
 impl CompositorHandler for IndicatorState {
@@ -43,9 +49,17 @@ impl CompositorHandler for IndicatorState {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _new_scale: i32,
+        surface: &wl_surface::WlSurface,
+        new_scale: i32,
     ) {
+        for s in &mut self.surfaces {
+            if s.layer.wl_surface() == surface {
+                s.scale = new_scale.max(1);
+                s.layer.wl_surface().set_buffer_scale(s.scale);
+                break;
+            }
+        }
+        self.draw_all();
     }
 
     fn frame(
@@ -94,8 +108,9 @@ impl OutputHandler for IndicatorState {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
+        output: wl_output::WlOutput,
     ) {
+        self.create_surface_for_output(Some(&output));
     }
 
     fn update_output(
@@ -122,21 +137,29 @@ impl ShmHandler for IndicatorState {
 }
 
 impl LayerShellHandler for IndicatorState {
-    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {
-        self.running.store(false, Ordering::Relaxed);
+    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, layer: &LayerSurface) {
+        self.surfaces
+            .retain(|s| s.layer.wl_surface() != layer.wl_surface());
+        if self.surfaces.is_empty() {
+            self.running.store(false, Ordering::Relaxed);
+        }
     }
 
     fn configure(
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _layer: &LayerSurface,
-        configure: LayerSurfaceConfigure,
+        layer: &LayerSurface,
+        _configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
-        self.configured = true;
-        let _ = configure;
-        self.draw();
+        for s in &mut self.surfaces {
+            if s.layer.wl_surface() == layer.wl_surface() {
+                s.configured = true;
+                break;
+            }
+        }
+        self.draw_all();
     }
 }
 
@@ -154,73 +177,115 @@ delegate_layer!(IndicatorState);
 delegate_registry!(IndicatorState);
 
 impl IndicatorState {
-    pub fn draw(&mut self) {
-        if !self.configured {
-            return;
+    pub fn create_surface_for_output(&mut self, output: Option<&wl_output::WlOutput>) {
+        let surface = self.compositor_state.create_surface(&self.qh);
+        let layer = self.layer_shell.create_layer_surface(
+            &self.qh,
+            surface,
+            Layer::Overlay,
+            Some("worktrack-indicator"),
+            output,
+        );
+
+        layer.set_anchor(Anchor::TOP | Anchor::RIGHT);
+        layer.set_size(LOGICAL_SIZE, LOGICAL_SIZE);
+        layer.set_margin(10, 10, 0, 0);
+        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+
+        // Click-through: empty input region allows clicks to pass through
+        if let Ok(region) = smithay_client_toolkit::compositor::Region::new(&self.compositor_state)
+        {
+            layer
+                .wl_surface()
+                .set_input_region(Some(region.wl_region()));
         }
 
-        let stride = (WIDTH * 4) as i32;
-        let (buffer, canvas) = match self.pool.create_buffer(
-            WIDTH as i32,
-            HEIGHT as i32,
-            stride,
-            wl_shm::Format::Argb8888,
-        ) {
-            Ok(res) => res,
-            Err(_) => return,
-        };
+        layer.commit();
 
+        self.surfaces.push(MonitorSurface {
+            layer,
+            scale: 1,
+            configured: false,
+        });
+    }
+
+    pub fn draw_all(&mut self) {
         let is_paused = self.paused.load(Ordering::Relaxed);
-        // Red dot when recording: ARGB = (255, 230, 30, 30)
-        // Yellow dot when paused: ARGB = (255, 240, 190, 20)
-        let (r, g, b) = if is_paused {
-            (240u8, 190u8, 20u8)
+
+        // Smooth colors
+        // Red when recording: (235, 35, 35)
+        // Yellow when paused: (245, 195, 25)
+        let (base_r, base_g, base_b) = if is_paused {
+            (245.0f32, 195.0f32, 25.0f32)
         } else {
-            (230u8, 30u8, 30u8)
+            (235.0f32, 35.0f32, 35.0f32)
         };
 
-        let center_x = (WIDTH as f32) / 2.0;
-        let center_y = (HEIGHT as f32) / 2.0;
-        let radius_sq = (center_x - 2.0).powi(2);
-        let inner_radius_sq = (center_x - 3.5).powi(2);
+        for i in 0..self.surfaces.len() {
+            if !self.surfaces[i].configured {
+                continue;
+            }
 
-        for y in 0..HEIGHT {
-            for x in 0..WIDTH {
-                let offset = ((y * WIDTH + x) * 4) as usize;
-                let dx = x as f32 - center_x + 0.5;
-                let dy = y as f32 - center_y + 0.5;
-                let dist_sq = dx * dx + dy * dy;
+            let scale = self.surfaces[i].scale.max(1);
+            let phys_size = (LOGICAL_SIZE as i32) * scale;
+            let stride = phys_size * 4;
 
-                if dist_sq <= radius_sq {
-                    if dist_sq >= inner_radius_sq {
-                        // Darker border
-                        canvas[offset] = (b as f32 * 0.7) as u8; // B
-                        canvas[offset + 1] = (g as f32 * 0.7) as u8; // G
-                        canvas[offset + 2] = (r as f32 * 0.7) as u8; // R
-                        canvas[offset + 3] = 255; // A
-                    } else {
-                        canvas[offset] = b;
-                        canvas[offset + 1] = g;
-                        canvas[offset + 2] = r;
-                        canvas[offset + 3] = 255;
+            let (buffer, canvas) = match self.pool.create_buffer(
+                phys_size,
+                phys_size,
+                stride,
+                wl_shm::Format::Argb8888,
+            ) {
+                Ok(res) => res,
+                Err(_) => continue,
+            };
+
+            let center = (phys_size as f32) / 2.0;
+            let radius = center - (2.5 * scale as f32);
+            let border_width = 1.8 * scale as f32;
+
+            for y in 0..phys_size {
+                for x in 0..phys_size {
+                    let offset = ((y * phys_size + x) * 4) as usize;
+                    let dx = (x as f32) - center + 0.5;
+                    let dy = (y as f32) - center + 0.5;
+                    let dist = (dx * dx + dy * dy).sqrt();
+
+                    // Anti-aliased circle edge
+                    let outer_alpha = (radius + 0.5 - dist).clamp(0.0, 1.0);
+
+                    if outer_alpha <= 0.0 {
+                        canvas[offset] = 0;
+                        canvas[offset + 1] = 0;
+                        canvas[offset + 2] = 0;
+                        canvas[offset + 3] = 0;
+                        continue;
                     }
-                } else {
-                    // Transparent
-                    canvas[offset] = 0;
-                    canvas[offset + 1] = 0;
-                    canvas[offset + 2] = 0;
-                    canvas[offset + 3] = 0;
+
+                    // Border shading
+                    let border_factor =
+                        ((dist - (radius - border_width)) / border_width).clamp(0.0, 1.0);
+                    let shade = 1.0 - (border_factor * 0.35);
+
+                    let r = base_r * shade;
+                    let g = base_g * shade;
+                    let b = base_b * shade;
+
+                    // Premultiplied ARGB for Wayland wl_shm
+                    let a_byte = (outer_alpha * 255.0).round() as u8;
+                    canvas[offset] = ((b * outer_alpha).round()) as u8;
+                    canvas[offset + 1] = ((g * outer_alpha).round()) as u8;
+                    canvas[offset + 2] = ((r * outer_alpha).round()) as u8;
+                    canvas[offset + 3] = a_byte;
                 }
             }
-        }
 
-        self.layer
-            .wl_surface()
-            .attach(Some(buffer.wl_buffer()), 0, 0);
-        self.layer
-            .wl_surface()
-            .damage_buffer(0, 0, WIDTH as i32, HEIGHT as i32);
-        self.layer.commit();
+            let surface = self.surfaces[i].layer.wl_surface();
+            surface.set_buffer_scale(scale);
+            surface.attach(Some(buffer.wl_buffer()), 0, 0);
+            surface.damage_buffer(0, 0, phys_size, phys_size);
+            self.surfaces[i].layer.commit();
+        }
     }
 }
 
@@ -249,30 +314,8 @@ pub fn run_indicator(paused: Arc<AtomicBool>, running: Arc<AtomicBool>) {
         Err(_) => return,
     };
 
-    let surface = compositor_state.create_surface(&qh);
-    let layer = layer_shell.create_layer_surface(
-        &qh,
-        surface,
-        Layer::Overlay,
-        Some("worktrack-indicator"),
-        None,
-    );
-
-    layer.set_anchor(Anchor::TOP | Anchor::RIGHT);
-    layer.set_size(WIDTH, HEIGHT);
-    layer.set_margin(8, 8, 0, 0);
-    layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-
-    // Click-through: empty input region
-    if let Ok(region) = smithay_client_toolkit::compositor::Region::new(&compositor_state) {
-        layer
-            .wl_surface()
-            .set_input_region(Some(region.wl_region()));
-    }
-
-    layer.commit();
-
-    let pool = match SlotPool::new((WIDTH * HEIGHT * 4) as usize, &shm) {
+    // Generous buffer pool for multiple monitors up to 4K HiDPI
+    let pool = match SlotPool::new(128 * 128 * 4 * 4, &shm) {
         Ok(p) => p,
         Err(_) => return,
     };
@@ -280,14 +323,31 @@ pub fn run_indicator(paused: Arc<AtomicBool>, running: Arc<AtomicBool>) {
     let mut state = IndicatorState {
         registry_state: RegistryState::new(&globals),
         output_state: OutputState::new(&globals, &qh),
-        _compositor_state: compositor_state,
+        compositor_state,
+        layer_shell,
         shm,
         pool,
-        layer,
+        surfaces: Vec::new(),
+        qh: qh.clone(),
         paused,
         running: running.clone(),
-        configured: false,
     };
+
+    // First roundtrip to populate outputs from registry
+    let _ = event_queue.roundtrip(&mut state);
+
+    // Create an indicator on each detected output
+    let outputs: Vec<wl_output::WlOutput> = state.output_state.outputs().collect();
+    if outputs.is_empty() {
+        // Fallback: let compositor choose output
+        state.create_surface_for_output(None);
+    } else {
+        for output in outputs {
+            state.create_surface_for_output(Some(&output));
+        }
+    }
+
+    let _ = event_queue.roundtrip(&mut state);
 
     let mut last_paused = state.paused.load(Ordering::Relaxed);
     let raw_fd = conn.as_fd().as_raw_fd();
@@ -296,13 +356,11 @@ pub fn run_indicator(paused: Arc<AtomicBool>, running: Arc<AtomicBool>) {
         let current_paused = state.paused.load(Ordering::Relaxed);
         if current_paused != last_paused {
             last_paused = current_paused;
-            state.draw();
+            state.draw_all();
         }
 
         let _ = conn.flush();
 
-        // Standard Wayland event loop integration:
-        // Prepare read guard, poll socket with 200ms timeout, then read and dispatch
         if let Some(guard) = conn.prepare_read() {
             let mut poll_fd = libc::pollfd {
                 fd: raw_fd,
