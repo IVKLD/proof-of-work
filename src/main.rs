@@ -262,8 +262,10 @@ fn run_daemon(cfg: Config) {
     let ind_running = running.clone();
     let ind_paused = paused.clone();
     let ind_hidden = hidden.clone();
+    let countdown = Arc::new(std::sync::atomic::AtomicI64::new(cfg.interval_secs as i64));
+    let ind_countdown = countdown.clone();
     let ind_thread = std::thread::spawn(move || {
-        indicator::run_indicator(ind_paused, ind_hidden, ind_running);
+        indicator::run_indicator(ind_paused, ind_hidden, ind_running, ind_countdown);
     });
 
     let initial_day = Local::now().format("%Y-%m-%d").to_string();
@@ -297,8 +299,17 @@ fn run_daemon(cfg: Config) {
             }
         }
 
+        if is_paused {
+            countdown.store(-1, Ordering::Relaxed);
+        } else {
+            let elapsed = last_capture.elapsed().as_secs();
+            let rem = (cfg.interval_secs as i64) - (elapsed as i64);
+            countdown.store(rem.max(0), Ordering::Relaxed);
+        }
+
         if !is_paused && last_capture.elapsed() >= Duration::from_secs(cfg.interval_secs) {
             last_capture = std::time::Instant::now();
+            countdown.store(cfg.interval_secs as i64, Ordering::Relaxed);
             let today = Local::now().format("%Y-%m-%d").to_string();
             let day_dir = cfg.dir.join(&today);
             let _ = fs::create_dir_all(&day_dir);

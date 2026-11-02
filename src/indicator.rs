@@ -1,8 +1,10 @@
 #![allow(unknown_lints, clippy::collapsible_if)]
 
+use ab_glyph::{FontRef, PxScale};
+use imageproc::drawing::{draw_text_mut, text_size};
 use std::os::fd::{AsFd, AsRawFd};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
 use smithay_client_toolkit::{
@@ -26,7 +28,9 @@ use wayland_client::{
     protocol::{wl_output, wl_shm, wl_surface},
 };
 
-const LOGICAL_SIZE: u32 = 28;
+const LOGICAL_WIDTH: u32 = 78;
+const LOGICAL_HEIGHT: u32 = 24;
+const FONT_DATA: &[u8] = include_bytes!("../assets/font.ttf");
 
 pub struct MonitorSurface {
     pub indicator_layer: LayerSurface,
@@ -50,6 +54,7 @@ pub struct IndicatorState {
     pub paused: Arc<AtomicBool>,
     pub hidden: Arc<AtomicBool>,
     pub running: Arc<AtomicBool>,
+    pub countdown: Arc<AtomicI64>,
 }
 
 impl CompositorHandler for IndicatorState {
@@ -203,7 +208,7 @@ impl IndicatorState {
             output,
         );
 
-        indicator_layer.set_size(LOGICAL_SIZE, LOGICAL_SIZE);
+        indicator_layer.set_size(LOGICAL_WIDTH, LOGICAL_HEIGHT);
         indicator_layer.set_anchor(Anchor::TOP | Anchor::RIGHT);
         indicator_layer.set_margin(12, 12, 0, 0);
         indicator_layer.set_keyboard_interactivity(KeyboardInteractivity::None);
@@ -258,72 +263,39 @@ impl IndicatorState {
             .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
             .join("worktrack.hide");
         let is_hidden = self.hidden.load(Ordering::Relaxed) || hide_file.exists();
-
-        // Vibrant Red: recording (#e63946)
-        // Warm Amber/Yellow: paused (#f4a261)
-        let (base_r, base_g, base_b) = if is_paused {
-            (244.0f32, 162.0f32, 97.0f32)
-        } else {
-            (230.0f32, 57.0f32, 70.0f32)
-        };
+        let remaining = self.countdown.load(Ordering::Relaxed);
 
         for s in &mut self.surfaces {
-            // 1. Draw indicator dot
+            // 1. Draw indicator pill with countdown & dot
             if s.indicator_configured {
                 let scale = s.scale.max(1);
-                let phys_size = (LOGICAL_SIZE as i32) * scale;
-                let stride = phys_size * 4;
+                let phys_w = (LOGICAL_WIDTH as i32) * scale;
+                let phys_h = (LOGICAL_HEIGHT as i32) * scale;
+                let stride = phys_w * 4;
 
                 if let Ok((buffer, canvas)) = self.pool.create_buffer(
-                    phys_size,
-                    phys_size,
+                    phys_w,
+                    phys_h,
                     stride,
                     wl_shm::Format::Argb8888,
                 ) {
                     if is_hidden {
                         canvas.fill(0);
                     } else {
-                        let center = (phys_size as f32) / 2.0;
-                        let radius = center - (2.5 * scale as f32);
-                        let border_width = 1.8 * scale as f32;
-
-                        for y in 0..phys_size {
-                            for x in 0..phys_size {
-                                let offset = ((y * phys_size + x) * 4) as usize;
-                                let dx = (x as f32) - center + 0.5;
-                                let dy = (y as f32) - center + 0.5;
-                                let dist = (dx * dx + dy * dy).sqrt();
-
-                                let outer_alpha = (radius + 0.5 - dist).clamp(0.0, 1.0);
-                                if outer_alpha <= 0.0 {
-                                    canvas[offset] = 0;
-                                    canvas[offset + 1] = 0;
-                                    canvas[offset + 2] = 0;
-                                    canvas[offset + 3] = 0;
-                                    continue;
-                                }
-
-                                let border_factor =
-                                    ((dist - (radius - border_width)) / border_width).clamp(0.0, 1.0);
-                                let shade = 1.0 - (border_factor * 0.35);
-
-                                let r = base_r * shade;
-                                let g = base_g * shade;
-                                let b = base_b * shade;
-
-                                let a_byte = (outer_alpha * 255.0).round() as u8;
-                                canvas[offset] = ((b * outer_alpha).round()) as u8;
-                                canvas[offset + 1] = ((g * outer_alpha).round()) as u8;
-                                canvas[offset + 2] = ((r * outer_alpha).round()) as u8;
-                                canvas[offset + 3] = a_byte;
-                            }
-                        }
+                        render_indicator_pill(
+                            canvas,
+                            phys_w as u32,
+                            phys_h as u32,
+                            scale,
+                            is_paused,
+                            remaining,
+                        );
                     }
 
                     let surface = s.indicator_layer.wl_surface();
                     surface.set_buffer_scale(scale);
                     surface.attach(Some(buffer.wl_buffer()), 0, 0);
-                    surface.damage_buffer(0, 0, phys_size, phys_size);
+                    surface.damage_buffer(0, 0, phys_w, phys_h);
                     s.indicator_layer.commit();
                 }
             }
@@ -368,10 +340,123 @@ impl IndicatorState {
     }
 }
 
+pub fn render_indicator_pill(
+    canvas: &mut [u8],
+    w: u32,
+    h: u32,
+    scale: i32,
+    is_paused: bool,
+    remaining: i64,
+) {
+    let mut img = image::RgbaImage::new(w, h);
+    let w_f = w as f32;
+    let h_f = h as f32;
+    let r_f = h_f / 2.0;
+    let scale_f = scale as f32;
+
+    // 1. Rounded pill background with subtle dark glass appearance
+    for y in 0..h {
+        for x in 0..w {
+            let cx = (x as f32 + 0.5).clamp(r_f, w_f - r_f);
+            let cy = r_f;
+            let dist = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+            let alpha = (r_f + 0.5 - dist).clamp(0.0, 1.0);
+            if alpha > 0.0 {
+                let border_width = 1.2 * scale_f;
+                let is_border = dist >= (r_f - border_width);
+                let (bg_r, bg_g, bg_b, bg_a) = if is_border {
+                    (65u8, 65u8, 75u8, (220.0 * alpha) as u8)
+                } else {
+                    (18u8, 18u8, 22u8, (200.0 * alpha) as u8)
+                };
+                img.put_pixel(x, y, image::Rgba([bg_r, bg_g, bg_b, bg_a]));
+            }
+        }
+    }
+
+    // 2. Countdown timer text
+    let text = if is_paused || remaining < 0 {
+        "PAUSE".to_string()
+    } else {
+        let m = remaining / 60;
+        let sec = remaining % 60;
+        format!("{m}:{sec:02}")
+    };
+
+    if let Ok(font) = FontRef::try_from_slice(FONT_DATA) {
+        let font_scale = PxScale::from(12.0 * scale_f);
+        let (_tw, th) = text_size(font_scale, &font, &text);
+        let tx = (9.0 * scale_f).round() as i32;
+        let ty = ((h_f - th as f32) / 2.0).round() as i32;
+        draw_text_mut(
+            &mut img,
+            image::Rgba([235, 235, 240, 255]),
+            tx,
+            ty,
+            font_scale,
+            &font,
+            &text,
+        );
+    }
+
+    // 3. Status indicator dot (red or amber)
+    let dot_cx = w_f - (12.0 * scale_f);
+    let dot_cy = h_f / 2.0;
+    let dot_radius = 4.2 * scale_f;
+    let (base_r, base_g, base_b) = if is_paused {
+        (244.0f32, 162.0f32, 97.0f32) // Amber
+    } else {
+        (230.0f32, 57.0f32, 70.0f32)  // Red
+    };
+
+    let min_x = (dot_cx - dot_radius - 2.0).max(0.0) as u32;
+    let max_x = (dot_cx + dot_radius + 2.0).min(w_f) as u32;
+    let min_y = (dot_cy - dot_radius - 2.0).max(0.0) as u32;
+    let max_y = (dot_cy + dot_radius + 2.0).min(h_f) as u32;
+
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            let dx = (x as f32 + 0.5) - dot_cx;
+            let dy = (y as f32 + 0.5) - dot_cy;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let dot_alpha = (dot_radius + 0.5 - dist).clamp(0.0, 1.0);
+            if dot_alpha > 0.0 {
+                let shade = 1.0 - (dist / dot_radius).clamp(0.0, 1.0) * 0.25;
+                let r = (base_r * shade) as u8;
+                let g = (base_g * shade) as u8;
+                let b = (base_b * shade) as u8;
+
+                // Alpha blend over pill
+                let existing = img.get_pixel(x, y).0;
+                let ex_a = existing[3] as f32 / 255.0;
+                let in_a = dot_alpha;
+                let out_a = in_a + ex_a * (1.0 - in_a);
+                if out_a > 0.0 {
+                    let out_r = ((r as f32 * in_a + existing[0] as f32 * ex_a * (1.0 - in_a)) / out_a) as u8;
+                    let out_g = ((g as f32 * in_a + existing[1] as f32 * ex_a * (1.0 - in_a)) / out_a) as u8;
+                    let out_b = ((b as f32 * in_a + existing[2] as f32 * ex_a * (1.0 - in_a)) / out_a) as u8;
+                    img.put_pixel(x, y, image::Rgba([out_r, out_g, out_b, (out_a * 255.0) as u8]));
+                }
+            }
+        }
+    }
+
+    // 4. Pre-multiplied ARGB8888 for Wayland SHM canvas
+    for (src, dst) in img.pixels().zip(canvas.chunks_exact_mut(4)) {
+        let [r, g, b, a] = src.0;
+        let alpha = a as f32 / 255.0;
+        dst[0] = ((b as f32) * alpha).round() as u8;
+        dst[1] = ((g as f32) * alpha).round() as u8;
+        dst[2] = ((r as f32) * alpha).round() as u8;
+        dst[3] = a;
+    }
+}
+
 pub fn run_indicator(
     paused: Arc<AtomicBool>,
     hidden: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
+    countdown: Arc<AtomicI64>,
 ) {
     let conn = match Connection::connect_to_env() {
         Ok(c) => c,
@@ -415,6 +500,7 @@ pub fn run_indicator(
         paused,
         hidden,
         running: running.clone(),
+        countdown,
     };
 
     let _ = event_queue.roundtrip(&mut state);
@@ -437,6 +523,7 @@ pub fn run_indicator(
 
     let mut last_paused = state.paused.load(Ordering::Relaxed);
     let mut last_hidden = state.hidden.load(Ordering::Relaxed) || hide_file.exists();
+    let mut last_countdown = state.countdown.load(Ordering::Relaxed);
     let raw_fd = conn.as_fd().as_raw_fd();
 
     while running.load(Ordering::Relaxed) {
@@ -444,10 +531,12 @@ pub fn run_indicator(
 
         let current_paused = state.paused.load(Ordering::Relaxed);
         let current_hidden = state.hidden.load(Ordering::Relaxed) || hide_file.exists();
+        let current_countdown = state.countdown.load(Ordering::Relaxed);
 
-        if current_paused != last_paused || current_hidden != last_hidden {
+        if current_paused != last_paused || current_hidden != last_hidden || current_countdown != last_countdown {
             last_paused = current_paused;
             last_hidden = current_hidden;
+            last_countdown = current_countdown;
             state.draw_all();
             let _ = conn.flush();
         }
@@ -612,4 +701,24 @@ pub fn capture_with_standalone_barrier(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_render_pill() {
+        let w = 78;
+        let h = 24;
+        let mut canvas = vec![0u8; (w * h * 4) as usize];
+        render_indicator_pill(&mut canvas, w, h, 1, false, 45);
+        let non_zero = canvas.iter().any(|&b| b > 0);
+        assert!(non_zero);
+
+        // Test paused
+        render_indicator_pill(&mut canvas, w, h, 1, true, -1);
+        let non_zero_paused = canvas.iter().any(|&b| b > 0);
+        assert!(non_zero_paused);
+    }
 }
