@@ -117,7 +117,20 @@ fn capture_windows(day_dir: &Path, app_regex: &Regex) {
                 let file_str = file_path.to_string_lossy().to_string();
 
                 if let Ok(()) = niri::screenshot_window(w.id, &file_str) {
-                    let _ = stamper::stamp_screenshot(&file_path, &now_stamp);
+                    // Wait up to 500ms for niri compositor to finish writing PNG to disk
+                    let mut stamped = false;
+                    for _ in 0..10 {
+                        std::thread::sleep(Duration::from_millis(50));
+                        if fs::metadata(&file_path).is_ok_and(|m| m.len() > 100)
+                            && stamper::stamp_screenshot(&file_path, &now_stamp).is_ok()
+                        {
+                            stamped = true;
+                            break;
+                        }
+                    }
+                    if !stamped {
+                        append_log(day_dir, &format!("WARN: could not stamp {file_name}"));
+                    }
                 }
             }
         }
@@ -230,13 +243,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = fs::remove_file(pause_file_path());
 
             let exe = std::env::current_exe()?;
-            let child = Command::new(exe)
-                .arg("daemon")
+            let mut cmd = Command::new(exe);
+            cmd.arg("daemon")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()?;
+                .stderr(Stdio::null());
 
+            #[cfg(unix)]
+            unsafe {
+                use std::os::unix::process::CommandExt;
+                cmd.pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                });
+            }
+
+            let child = cmd.spawn()?;
             println!("Трекер запущен (PID {})", child.id());
         }
 
