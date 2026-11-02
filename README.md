@@ -1,49 +1,41 @@
 # proof-of-work
 
-Pure Wayland (niri) трекер рабочего времени со скриншотами активных приложений и оверлейным индикатором. Без X11 / XWayland, без Python, без внешних утилит.
+Быстрый трекер рабочего времени для Wayland (niri) с автоматическими скриншотами рабочих окон и экранным индикатором статуса.
 
 ## Особенности
-* **Захват окон вместо экрана**: Снимает только окна разрешённых рабочих программ на видимых воркспейсах через IPC `niri`. Обои, чужие столы и личные окна (пароли, личные чаты) не попадают в архив.
-* **Штамп даты и времени**: В левом нижнем углу снимка наносится текущая метка времени (быстрый рендеринг прямо в память через встроенный TTF).
-* **Wayland-индикатор**: Легковесная точка в углу экрана (`wlr-layer-shell`), клики проходят сквозь неё:
-  * 🔴 **Красный** — идёт запись
-  * 🟡 **Жёлтый** — пауза (отошёл пообедать)
-* **Встроенная архивация**: Создание `.tar.gz` средствами Rust и автовыгрузка в конце дня.
+* **Захват только рабочих окон**: Снимает только выбранные приложения через IPC `niri`. Личные программы, фоновые вкладки и рабочий стол не попадают в архив.
+* **Штамп даты и времени**: На каждый снимок автоматически наносится таймштамп в левом нижнем углу.
+* **Экранный индикатор (Wayland)**: Небольшая точка-оверлей в правом верхнем углу (клики проходят сквозь неё):
+  * 🔴 **Красный** — запись активна
+  * 🟡 **Жёлтый** — на паузе
+* **Архивация**: Автоматическая сборка в `.tar.gz` и опциональная выгрузка на сервер по окончании работы.
 
 ---
 
-## Запуск без установки (Nix Run)
+## Запуск (Nix Run)
 
 ```bash
-# Посмотреть открытые окна и статус фильтра:
+# Проверить список окон и статус фильтра:
 nix run github:IVKLD/proof-of-work -- windows
 
-# Запустить трекер:
+# Управление:
 nix run github:IVKLD/proof-of-work -- start
-
-# Пауза / Возобновление:
 nix run github:IVKLD/proof-of-work -- pause
 nix run github:IVKLD/proof-of-work -- resume
-
-# Статус:
 nix run github:IVKLD/proof-of-work -- status
-
-# Остановка и упаковка архива:
 nix run github:IVKLD/proof-of-work -- stop
 ```
 
 ---
 
-## Установка в NixOS через Flake
+## Установка в NixOS
 
-### В `flake.nix` вашей системы (`/etc/nixos/flake.nix`):
+Добавьте в `/etc/nixos/flake.nix`:
 
 ```nix
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    
-    # Подключение proof-of-work:
     proof-of-work = {
       url = "github:IVKLD/proof-of-work";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -53,42 +45,30 @@ nix run github:IVKLD/proof-of-work -- stop
   outputs = { self, nixpkgs, proof-of-work, ... }: {
     nixosConfigurations.desktop = nixpkgs.lib.nixosSystem {
       modules = [
-        # Вариант 1 (рекомендуемый): через готовый модуль
         proof-of-work.nixosModules.default
         {
           programs.worktrack.enable = true;
         }
-
-        # ИЛИ Вариант 2: просто добавить пакет в systemPackages
-        # {
-        #   environment.systemPackages = [
-        #     proof-of-work.packages.${pkgs.stdenv.hostPlatform.system}.default
-        #   ];
-        # }
       ];
     };
   };
 }
 ```
 
-После применения (`nixos-rebuild switch`) команда `worktrack` будет доступна глобально в системе.
-
 ---
 
-## Настройка (`~/.config/worktrack.env`)
-
-Создайте файл `~/.config/worktrack.env` при необходимости переопределить параметры:
+## Конфигурация (`~/.config/worktrack.env`)
 
 ```bash
-# Директория для скриншотов и архивов (по умолчанию ~/worklog):
+# Директория архивов и скриншотов (по умолчанию ~/worklog):
 WORKTRACK_DIR="$HOME/worklog"
 
 # Интервал снимков в секундах (по умолчанию 60):
 WORKTRACK_INTERVAL=60
 
-# Регулярка по app_id для фильтрации окон:
+# Фильтр окон по app_id (regex):
 WORKTRACK_APPS="^(kitty|firefox|code|Code|discord|vesktop|org\\.telegram\\.desktop)$"
 
-# Команда автоматической отправки архива в конце дня (stop/pack/upload):
+# Команда выгрузки архива в конце дня:
 # WORKTRACK_UPLOAD_CMD='curl -fsS -F "file=@{file}" https://example.com/upload'
 ```
