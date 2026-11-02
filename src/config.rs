@@ -5,6 +5,7 @@ use std::path::PathBuf;
 pub struct Config {
     pub dir: PathBuf,
     pub interval_secs: u64,
+    pub daily_hours: f32,
     pub output: Option<String>,
     pub workspace: Option<String>,
     pub scale: Option<f32>,
@@ -34,6 +35,7 @@ impl Default for Config {
         Self {
             dir: PathBuf::from(home).join("worklog"),
             interval_secs: 60,
+            daily_hours: 8.0,
             output: None,
             workspace: None,
             scale: None,
@@ -64,6 +66,13 @@ impl Config {
                             "WORKTRACK_INTERVAL" => {
                                 if let Ok(n) = val.parse() {
                                     cfg.interval_secs = n;
+                                }
+                            }
+                            "WORKTRACK_DAILY_HOURS" | "WORKTRACK_WORK_HOURS" => {
+                                if let Ok(h) = val.parse::<f32>()
+                                    && h > 0.0
+                                {
+                                    cfg.daily_hours = h;
                                 }
                             }
                             "WORKTRACK_OUTPUT" if !val.is_empty() => {
@@ -101,6 +110,14 @@ impl Config {
             .and_then(|v| v.parse().ok())
         {
             cfg.interval_secs = n;
+        }
+        if let Some(h) = std::env::var("WORKTRACK_DAILY_HOURS")
+            .ok()
+            .or_else(|| std::env::var("WORKTRACK_WORK_HOURS").ok())
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            && h > 0.0
+        {
+            cfg.daily_hours = h;
         }
         if let Ok(val) = std::env::var("WORKTRACK_OUTPUT") {
             let trimmed = val.trim();
@@ -143,6 +160,7 @@ mod tests {
     fn test_config_defaults() {
         let cfg = Config::default();
         assert_eq!(cfg.interval_secs, 60);
+        assert_eq!(cfg.daily_hours, 8.0);
         assert!(cfg.output.is_none());
         assert!(cfg.workspace.is_none());
     }

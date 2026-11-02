@@ -280,12 +280,25 @@ fn run_daemon(cfg: Config) {
 
     let target_output = Arc::new(std::sync::RwLock::new(initial_target));
 
+    let daily_goal_secs = (cfg.daily_hours * 3600.0).round() as u64;
+    let initial_shots = count_screenshots_today(&cfg.dir);
+    let mut prior_worked_secs = (initial_shots as u64) * cfg.interval_secs;
+    let mut session_worked_secs: u64 = 0;
+
+    let initial_rem_work = if prior_worked_secs >= daily_goal_secs {
+        -((prior_worked_secs - daily_goal_secs) as i64)
+    } else {
+        (daily_goal_secs - prior_worked_secs) as i64
+    };
+
     // Start Wayland indicator thread
     let ind_running = running.clone();
     let ind_paused = paused.clone();
     let ind_hidden = hidden.clone();
     let countdown = Arc::new(std::sync::atomic::AtomicI64::new(cfg.interval_secs as i64));
+    let work_remaining = Arc::new(std::sync::atomic::AtomicI64::new(initial_rem_work));
     let ind_countdown = countdown.clone();
+    let ind_work_rem = work_remaining.clone();
     let ind_scale = cfg.scale;
     let ind_target_out = target_output.clone();
     let ind_thread = std::thread::spawn(move || {
@@ -294,6 +307,7 @@ fn run_daemon(cfg: Config) {
             ind_hidden,
             ind_running,
             ind_countdown,
+            ind_work_rem,
             ind_scale,
             ind_target_out,
         );
@@ -304,20 +318,30 @@ fn run_daemon(cfg: Config) {
     let _ = fs::create_dir_all(&initial_dir);
     append_log(&initial_dir, "START");
 
+    let mut current_day = initial_day;
     let mut last_capture = std::time::Instant::now()
         .checked_sub(Duration::from_secs(cfg.interval_secs))
         .unwrap_or_else(std::time::Instant::now);
 
     let mut prev_paused = paused.load(Ordering::Relaxed);
     let capturing = Arc::new(AtomicBool::new(false));
+    let mut last_second_tick = std::time::Instant::now();
 
     while running.load(Ordering::SeqCst) {
         let is_paused = pause_file_path().exists();
         paused.store(is_paused, Ordering::Relaxed);
 
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        if today != current_day {
+            current_day = today.clone();
+            let day_dir = cfg.dir.join(&today);
+            let _ = fs::create_dir_all(&day_dir);
+            prior_worked_secs = 0;
+            session_worked_secs = 0;
+        }
+
         if prev_paused != is_paused {
             prev_paused = is_paused;
-            let today = Local::now().format("%Y-%m-%d").to_string();
             let day_dir = cfg.dir.join(&today);
             let _ = fs::create_dir_all(&day_dir);
             if is_paused {
@@ -329,6 +353,28 @@ fn run_daemon(cfg: Config) {
                     .checked_sub(Duration::from_secs(cfg.interval_secs))
                     .unwrap_or_else(std::time::Instant::now);
             }
+        }
+
+        if last_second_tick.elapsed() >= Duration::from_secs(1) {
+            let elapsed_ticks = last_second_tick.elapsed().as_secs();
+            last_second_tick = std::time::Instant::now();
+            if !is_paused {
+                session_worked_secs += elapsed_ticks;
+            }
+
+            let total_worked = prior_worked_secs + session_worked_secs;
+            let rem_work = if total_worked >= daily_goal_secs {
+                -((total_worked - daily_goal_secs) as i64)
+            } else {
+                (daily_goal_secs - total_worked) as i64
+            };
+            work_remaining.store(rem_work, Ordering::Relaxed);
+
+            let stats_path = runtime_dir().join("worktrack.stats");
+            let _ = fs::write(
+                stats_path,
+                format!("{prior_worked_secs}\n{session_worked_secs}\n{daily_goal_secs}\n{rem_work}"),
+            );
         }
 
         if is_paused {
@@ -348,7 +394,6 @@ fn run_daemon(cfg: Config) {
             capturing.store(true, Ordering::SeqCst);
 
             let cap_cfg = cfg.clone();
-            let today = Local::now().format("%Y-%m-%d").to_string();
             let day_dir = cfg.dir.join(&today);
             let _ = fs::create_dir_all(&day_dir);
             let cap_hidden = hidden.clone();
@@ -368,13 +413,25 @@ fn run_daemon(cfg: Config) {
     let day_dir = cfg.dir.join(&today);
     append_log(&day_dir, "STOP");
 
+    let _ = fs::remove_file(runtime_dir().join("worktrack.stats"));
     let _ = fs::remove_file(pid_file_path());
     let _ = fs::remove_file(pause_file_path());
     let _ = ind_thread.join();
 }
 
+fn format_duration_hm(secs: u64) -> String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    if h > 0 {
+        format!("{h} ч {m:02} мин")
+    } else {
+        format!("{m} мин")
+    }
+}
+
 fn print_status(cfg: &Config) {
     let pid = get_running_pid();
+    let is_running = pid.is_some();
     match pid {
         Some(p) => {
             let paused = pause_file_path().exists();
@@ -390,6 +447,59 @@ fn print_status(cfg: &Config) {
     }
     let count = count_screenshots_today(&cfg.dir);
     println!("Скриншотов за сегодня: {count}");
+
+    let daily_goal_secs = (cfg.daily_hours * 3600.0).round() as u64;
+
+    let (prior_secs, session_secs, total_worked_secs, rem_secs) = if is_running {
+        let stats_path = runtime_dir().join("worktrack.stats");
+        if let Ok(content) = fs::read_to_string(&stats_path) {
+            let lines: Vec<&str> = content.lines().collect();
+            if lines.len() >= 4 {
+                let prior = lines[0].parse::<u64>().unwrap_or(0);
+                let session = lines[1].parse::<u64>().unwrap_or(0);
+                let _goal = lines[2].parse::<u64>().unwrap_or(daily_goal_secs);
+                let rem = lines[3].parse::<i64>().unwrap_or(0);
+                (prior, session, prior + session, rem)
+            } else {
+                let prior = (count as u64) * cfg.interval_secs;
+                let total = prior;
+                let rem = (daily_goal_secs as i64) - (total as i64);
+                (prior, 0, total, rem)
+            }
+        } else {
+            let prior = (count as u64) * cfg.interval_secs;
+            let total = prior;
+            let rem = (daily_goal_secs as i64) - (total as i64);
+            (prior, 0, total, rem)
+        }
+    } else {
+        let prior = (count as u64) * cfg.interval_secs;
+        let total = prior;
+        let rem = (daily_goal_secs as i64) - (total as i64);
+        (prior, 0, total, rem)
+    };
+
+    let goal_str = format_duration_hm(daily_goal_secs);
+    let total_str = format_duration_hm(total_worked_secs);
+    let percent = ((total_worked_secs as f64 / daily_goal_secs as f64) * 100.0).min(100.0);
+
+    println!("Цель на день: {goal_str} (WORKTRACK_DAILY_HOURS={})", cfg.daily_hours);
+    if is_running && prior_secs > 0 {
+        println!("  - В прошлых сменах сегодня: {}", format_duration_hm(prior_secs));
+        println!("  - В текущей смене: {}", format_duration_hm(session_secs));
+    }
+    println!("Всего отработано сегодня: {total_str} ({percent:.0}%)");
+
+    if rem_secs <= 0 {
+        let overtime = (-rem_secs) as u64;
+        if overtime >= 60 {
+            println!("Норма выполнена! Переработка: {}", format_duration_hm(overtime));
+        } else {
+            println!("Норма на сегодня полностью выполнена!");
+        }
+    } else {
+        println!("Осталось отработать сегодня: {}", format_duration_hm(rem_secs as u64));
+    }
 
     if let Some(ref ws) = cfg.workspace {
         println!("Настроенный воркспейс: WORKTRACK_WORKSPACE=\"{ws}\"");

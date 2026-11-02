@@ -28,7 +28,7 @@ use wayland_client::{
     protocol::{wl_output, wl_shm, wl_surface},
 };
 
-const LOGICAL_WIDTH: u32 = 78;
+const LOGICAL_WIDTH: u32 = 130;
 const LOGICAL_HEIGHT: u32 = 24;
 const FONT_DATA: &[u8] = include_bytes!("../assets/font.ttf");
 
@@ -54,6 +54,7 @@ pub struct IndicatorState {
     pub hidden: Arc<AtomicBool>,
     pub running: Arc<AtomicBool>,
     pub countdown: Arc<AtomicI64>,
+    pub work_remaining: Arc<AtomicI64>,
     pub scale_override: Option<f32>,
     pub target_output: Arc<std::sync::RwLock<Option<String>>>,
 }
@@ -301,6 +302,7 @@ impl IndicatorState {
             .join("worktrack.hide");
         let is_hidden = self.hidden.load(Ordering::Relaxed) || hide_file.exists();
         let remaining = self.countdown.load(Ordering::Relaxed);
+        let work_rem = self.work_remaining.load(Ordering::Relaxed);
         let current_target = self.target_output.read().ok().and_then(|g| g.clone());
 
         for s in &mut self.surfaces {
@@ -333,6 +335,7 @@ impl IndicatorState {
                             total_scale,
                             is_paused,
                             remaining,
+                            work_rem,
                         );
                     }
 
@@ -353,7 +356,8 @@ pub fn render_indicator_pill(
     h: u32,
     total_scale: f32,
     is_paused: bool,
-    remaining: i64,
+    shot_remaining: i64,
+    work_remaining: i64,
 ) {
     let mut img = image::RgbaImage::new(w, h);
     let w_f = w as f32;
@@ -380,14 +384,32 @@ pub fn render_indicator_pill(
         }
     }
 
-    // 2. Countdown timer text
-    let text = if is_paused || remaining < 0 {
+    // 2. Countdown timer and daily remaining work time text
+    let shot_text = if is_paused || shot_remaining < 0 {
         "PAUSE".to_string()
     } else {
-        let m = remaining / 60;
-        let sec = remaining % 60;
+        let m = shot_remaining / 60;
+        let sec = shot_remaining % 60;
         format!("{m}:{sec:02}")
     };
+
+    let work_text = if work_remaining <= 0 {
+        let overtime = (-work_remaining) as u64;
+        if overtime >= 60 {
+            let oh = overtime / 3600;
+            let om = (overtime % 3600) / 60;
+            format!("+{oh}h {om:02}m")
+        } else {
+            "0h 00m".to_string()
+        }
+    } else {
+        let rem = work_remaining as u64;
+        let rh = rem / 3600;
+        let rm = (rem % 3600) / 60;
+        format!("{rh}h {rm:02}m")
+    };
+
+    let text = format!("{shot_text} | {work_text}");
 
     if let Ok(font) = FontRef::try_from_slice(FONT_DATA) {
         let font_scale = PxScale::from(12.0 * total_scale);
@@ -425,12 +447,14 @@ pub fn render_indicator_pill(
         );
     }
 
-    // 3. Status indicator dot (red or amber)
+    // 3. Status indicator dot (red, amber, or green)
     let dot_cx = w_f - (12.0 * total_scale);
     let dot_cy = h_f / 2.0;
     let dot_radius = 4.2 * total_scale;
     let (base_r, base_g, base_b) = if is_paused {
         (244.0f32, 162.0f32, 97.0f32) // Amber
+    } else if work_remaining <= 0 {
+        (46.0f32, 196.0f32, 182.0f32)  // Teal/Green: Daily goal achieved!
     } else {
         (230.0f32, 57.0f32, 70.0f32)  // Red
     };
@@ -483,6 +507,7 @@ pub fn run_indicator(
     hidden: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     countdown: Arc<AtomicI64>,
+    work_remaining: Arc<AtomicI64>,
     scale_override: Option<f32>,
     target_output: Arc<std::sync::RwLock<Option<String>>>,
 ) {
@@ -522,6 +547,7 @@ pub fn run_indicator(
         hidden,
         running: running.clone(),
         countdown,
+        work_remaining,
         scale_override,
         target_output,
     };
@@ -553,6 +579,7 @@ pub fn run_indicator(
     let mut last_paused = state.paused.load(Ordering::Relaxed);
     let mut last_hidden = state.hidden.load(Ordering::Relaxed) || hide_file.exists();
     let mut last_countdown = state.countdown.load(Ordering::Relaxed);
+    let mut last_work_rem = state.work_remaining.load(Ordering::Relaxed);
     let mut last_target = state.target_output.read().ok().and_then(|g| g.clone());
     let raw_fd = conn.as_fd().as_raw_fd();
 
@@ -562,16 +589,19 @@ pub fn run_indicator(
         let current_paused = state.paused.load(Ordering::Relaxed);
         let current_hidden = state.hidden.load(Ordering::Relaxed) || hide_file.exists();
         let current_countdown = state.countdown.load(Ordering::Relaxed);
+        let current_work_rem = state.work_remaining.load(Ordering::Relaxed);
         let current_target = state.target_output.read().ok().and_then(|g| g.clone());
 
         if current_paused != last_paused
             || current_hidden != last_hidden
             || current_countdown != last_countdown
+            || current_work_rem != last_work_rem
             || current_target != last_target
         {
             last_paused = current_paused;
             last_hidden = current_hidden;
             last_countdown = current_countdown;
+            last_work_rem = current_work_rem;
             last_target = current_target;
             state.draw_all();
             let _ = conn.flush();
@@ -605,16 +635,16 @@ mod tests {
 
     #[test]
     fn test_render_pill() {
-        let w = 172;
+        let w = 286;
         let h = 53;
         let mut canvas = vec![0u8; (w * h * 4) as usize];
 
-        // 1. Test countdown "1:00"
-        render_indicator_pill(&mut canvas, w, h, 2.2, false, 60);
+        // 1. Test countdown "1:00 | 7h 45m"
+        render_indicator_pill(&mut canvas, w, h, 2.2, false, 60, 7 * 3600 + 45 * 60);
         let mut y_min = h;
         let mut y_max = 0;
         for y in 0..h {
-            for x in 15..100 {
+            for x in 15..150 {
                 let idx = ((y * w + x) * 4) as usize;
                 let (b, g, r) = (canvas[idx], canvas[idx + 1], canvas[idx + 2]);
                 if r > 180 && g > 180 && b > 180 {
@@ -623,16 +653,16 @@ mod tests {
                 }
             }
         }
-        println!("1:00 -> top margin: {}, bottom margin: {}", y_min, h - 1 - y_max);
+        println!("1:00 | 7h 45m -> top margin: {}, bottom margin: {}", y_min, h - 1 - y_max);
         assert!((y_min as i32 - (h - 1 - y_max) as i32).abs() <= 1);
 
-        // 2. Test "PAUSE"
+        // 2. Test "PAUSE | 7h 45m"
         canvas.fill(0);
-        render_indicator_pill(&mut canvas, w, h, 2.2, true, -1);
+        render_indicator_pill(&mut canvas, w, h, 2.2, true, -1, 7 * 3600 + 45 * 60);
         let mut p_min = h;
         let mut p_max = 0;
         for y in 0..h {
-            for x in 15..100 {
+            for x in 15..150 {
                 let idx = ((y * w + x) * 4) as usize;
                 let (b, g, r) = (canvas[idx], canvas[idx + 1], canvas[idx + 2]);
                 if r > 180 && g > 180 && b > 180 {
@@ -641,7 +671,7 @@ mod tests {
                 }
             }
         }
-        println!("PAUSE -> top margin: {}, bottom margin: {}", p_min, h - 1 - p_max);
+        println!("PAUSE | 7h 45m -> top margin: {}, bottom margin: {}", p_min, h - 1 - p_max);
         assert!((p_min as i32 - (h - 1 - p_max) as i32).abs() <= 1);
     }
 }
