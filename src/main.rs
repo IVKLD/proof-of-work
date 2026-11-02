@@ -152,10 +152,10 @@ fn capture_screen(
             let prev_focused_out = niri::get_focused_output().map(|o| o.name);
 
             // Switch to workspace
+            let _ = niri::focus_monitor(&out_name);
             if let Some(ref name) = ws.name {
                 let _ = niri::focus_workspace(name);
             } else if let Some(idx) = ws.idx {
-                let _ = niri::focus_monitor(&out_name);
                 let _ = niri::focus_workspace(&idx.to_string());
             }
             // Settle time for workspace transition to complete before screenshot
@@ -220,24 +220,30 @@ fn capture_screen(
 
     // 3. Restore previous workspace/window if we switched
     if needs_restore {
-        if let Some(win_id) = prev_win_id {
-            let _ = niri::focus_window(win_id);
-        } else if let Some(prev_ws) = prev_active_ws {
-            if let Some(ref name) = prev_ws.name {
-                let _ = niri::focus_workspace(name);
-            } else if let Some(idx) = prev_ws.idx {
-                if let Some(ref out) = prev_ws.output {
-                    let _ = niri::focus_monitor(out);
+        let mut restored = false;
+        if let Some(win_id) = prev_win_id
+            && niri::focus_window(win_id).is_ok()
+        {
+            restored = true;
+        }
+        if !restored {
+            if let Some(prev_ws) = prev_active_ws {
+                if let Some(ref name) = prev_ws.name {
+                    let _ = niri::focus_workspace(name);
+                } else if let Some(idx) = prev_ws.idx {
+                    if let Some(ref out) = prev_ws.output {
+                        let _ = niri::focus_monitor(out);
+                    }
+                    let _ = niri::focus_workspace(&idx.to_string());
+                } else {
+                    let _ = niri::focus_workspace_previous();
                 }
-                let _ = niri::focus_workspace(&idx.to_string());
+                if let Some(ref prev_out) = prev_focused_output {
+                    let _ = niri::focus_monitor(prev_out);
+                }
             } else {
                 let _ = niri::focus_workspace_previous();
             }
-            if let Some(ref prev_out) = prev_focused_output {
-                let _ = niri::focus_monitor(prev_out);
-            }
-        } else {
-            let _ = niri::focus_workspace_previous();
         }
     }
 
@@ -249,8 +255,8 @@ fn capture_screen(
             } else {
                 niri::get_blocked_window_rects_on_output(&out_name, &cfg.blocked_apps)
             };
-            if stamper::stamp_screenshot(&file_path, &now_stamp, &blocked_rects).is_err() {
-                append_log(day_dir, &format!("WARN: could not stamp {file_name}"));
+            if let Err(err) = stamper::stamp_screenshot(&file_path, &now_stamp, &blocked_rects) {
+                append_log(day_dir, &format!("WARN: could not stamp {file_name}: {err}"));
             }
         }
         Err(err) => {

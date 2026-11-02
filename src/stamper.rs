@@ -115,10 +115,27 @@ mod tests {
         img.save(&path).unwrap();
         stamp_screenshot(&path, "2026-11-02 21:45:00", &[[50, 50, 100, 100]]).unwrap();
         let stamped = image::open(&path).unwrap().to_rgba8();
-        // Check pixel inside blackout rect
         assert_eq!(stamped.get_pixel(60, 60), &Rgba([0, 0, 0, 255]));
-        // Check pixel outside blackout rect
         assert_eq!(stamped.get_pixel(10, 10), &Rgba([255, 255, 255, 255]));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_saved_screenshot_integrity() {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        if let Ok(home) = std::env::var("HOME") {
+            let day_dir = std::path::PathBuf::from(home).join("worklog").join(today);
+            if let Ok(entries) = std::fs::read_dir(day_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().is_some_and(|e| e == "png") {
+                        let img = image::open(&path).expect("Failed to open saved screenshot");
+                        let (w, h) = (img.width(), img.height());
+                        assert!(w > 0 && h > 0);
+                        break;
+                    }
+                }
+            }
+        }
     }
 }

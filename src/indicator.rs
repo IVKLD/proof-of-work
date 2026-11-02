@@ -1,6 +1,6 @@
 #![allow(unknown_lints, clippy::collapsible_if)]
 
-use ab_glyph::{FontRef, PxScale};
+use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use imageproc::drawing::{draw_text_mut, text_size};
 use std::os::fd::{AsFd, AsRawFd};
 use std::sync::Arc;
@@ -466,9 +466,29 @@ pub fn render_indicator_pill(
 
     if let Ok(font) = FontRef::try_from_slice(FONT_DATA) {
         let font_scale = PxScale::from(12.0 * total_scale);
-        let (_tw, th) = text_size(font_scale, &font, &text);
+        let scaled = font.as_scaled(font_scale);
+
+        let mut min_y = f32::MAX;
+        let mut max_y = f32::MIN;
+        for c in text.chars() {
+            let glyph = scaled.scaled_glyph(c);
+            if let Some(outline) = font.outline_glyph(glyph) {
+                let bounds = outline.px_bounds();
+                if bounds.min.y < min_y { min_y = bounds.min.y; }
+                if bounds.max.y > max_y { max_y = bounds.max.y; }
+            }
+        }
+
+        let text_center_offset = if min_y < max_y {
+            scaled.ascent() + (min_y + max_y) / 2.0
+        } else {
+            let (_tw, th) = text_size(font_scale, &font, &text);
+            th as f32 / 2.0
+        };
+
         let tx = (9.0 * total_scale).round() as i32;
-        let ty = ((h_f - th as f32) / 2.0).round() as i32;
+        let ty = ((h_f / 2.0) - text_center_offset).round() as i32;
+
         draw_text_mut(
             &mut img,
             image::Rgba([240, 240, 245, 255]),
@@ -717,7 +737,7 @@ pub fn capture_with_standalone_barrier(
     let compositor_state = CompositorState::bind(&globals, &qh)?;
     let layer_shell = LayerShell::bind(&globals, &qh)?;
     let shm = Shm::bind(&globals, &qh)?;
-    let pool = SlotPool::new(3840 * 2160 * 4, &shm)?;
+    let pool = SlotPool::new(64 * 1024 * 1024, &shm)?;
 
     let mut state = BarrierState {
         registry_state: RegistryState::new(&globals),
@@ -803,13 +823,40 @@ mod tests {
         let w = 172;
         let h = 53;
         let mut canvas = vec![0u8; (w * h * 4) as usize];
-        render_indicator_pill(&mut canvas, w, h, 2.2, false, 45);
-        let non_zero = canvas.iter().any(|&b| b > 0);
-        assert!(non_zero);
 
-        // Test paused
+        // 1. Test countdown "1:00"
+        render_indicator_pill(&mut canvas, w, h, 2.2, false, 60);
+        let mut y_min = h;
+        let mut y_max = 0;
+        for y in 0..h {
+            for x in 15..100 {
+                let idx = ((y * w + x) * 4) as usize;
+                let (b, g, r) = (canvas[idx], canvas[idx + 1], canvas[idx + 2]);
+                if r > 180 && g > 180 && b > 180 {
+                    if y < y_min { y_min = y; }
+                    if y > y_max { y_max = y; }
+                }
+            }
+        }
+        println!("1:00 -> top margin: {}, bottom margin: {}", y_min, h - 1 - y_max);
+        assert!((y_min as i32 - (h - 1 - y_max) as i32).abs() <= 1);
+
+        // 2. Test "PAUSE"
+        canvas.fill(0);
         render_indicator_pill(&mut canvas, w, h, 2.2, true, -1);
-        let non_zero_paused = canvas.iter().any(|&b| b > 0);
-        assert!(non_zero_paused);
+        let mut p_min = h;
+        let mut p_max = 0;
+        for y in 0..h {
+            for x in 15..100 {
+                let idx = ((y * w + x) * 4) as usize;
+                let (b, g, r) = (canvas[idx], canvas[idx + 1], canvas[idx + 2]);
+                if r > 180 && g > 180 && b > 180 {
+                    if y < p_min { p_min = y; }
+                    if y > p_max { p_max = y; }
+                }
+            }
+        }
+        println!("PAUSE -> top margin: {}, bottom margin: {}", p_min, h - 1 - p_max);
+        assert!((p_min as i32 - (h - 1 - p_max) as i32).abs() <= 1);
     }
 }
