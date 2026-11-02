@@ -153,6 +153,7 @@ fn capture_screen(day_dir: &Path, cfg: &Config, hidden: Option<&Arc<AtomicBool>>
                 let _ = niri::focus_monitor(&out_name);
                 let _ = niri::focus_workspace(&idx.to_string());
             }
+            std::thread::sleep(Duration::from_millis(100));
 
             (
                 out_name,
