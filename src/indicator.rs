@@ -33,6 +33,7 @@ const LOGICAL_HEIGHT: u32 = 24;
 const FONT_DATA: &[u8] = include_bytes!("../assets/font.ttf");
 
 pub struct MonitorSurface {
+    pub output: Option<wl_output::WlOutput>,
     pub indicator_layer: LayerSurface,
     pub bg_cover_layer: LayerSurface,
     pub scale: i32,
@@ -132,16 +133,32 @@ impl OutputHandler for IndicatorState {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
+        output: wl_output::WlOutput,
     ) {
+        let new_ui_scale = self.compute_ui_scale(Some(&output));
+        for s in &mut self.surfaces {
+            if s.output.as_ref() == Some(&output) {
+                if (s.ui_scale - new_ui_scale).abs() > 0.01 {
+                    s.ui_scale = new_ui_scale;
+                    let logical_w = (LOGICAL_WIDTH as f32 * new_ui_scale).round() as u32;
+                    let logical_h = (LOGICAL_HEIGHT as f32 * new_ui_scale).round() as u32;
+                    let logical_margin = (12.0 * new_ui_scale).round() as i32;
+                    s.indicator_layer.set_size(logical_w, logical_h);
+                    s.indicator_layer.set_margin(logical_margin, logical_margin, 0, 0);
+                    s.indicator_layer.commit();
+                }
+                break;
+            }
+        }
     }
 
     fn output_destroyed(
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
+        output: wl_output::WlOutput,
     ) {
+        self.surfaces.retain(|s| s.output.as_ref() != Some(&output));
     }
 }
 
@@ -199,12 +216,18 @@ delegate_layer!(IndicatorState);
 delegate_registry!(IndicatorState);
 
 impl IndicatorState {
-    pub fn create_surface_for_output(&mut self, output: Option<&wl_output::WlOutput>) {
-        let ui_scale = if let Some(override_scale) = self.scale_override {
+    pub fn compute_ui_scale(&self, output: Option<&wl_output::WlOutput>) -> f32 {
+        if let Some(override_scale) = self.scale_override {
             override_scale.max(0.5)
         } else {
             let (mon_w, mon_h) = if let Some(info) = output.and_then(|o| self.output_state.info(o)) {
-                info.logical_size.unwrap_or((1920, 1080))
+                info.logical_size.unwrap_or_else(|| {
+                    info.modes
+                        .iter()
+                        .find(|m| m.current)
+                        .map(|m| (m.dimensions.0, m.dimensions.1))
+                        .unwrap_or((1920, 1080))
+                })
             } else {
                 (1920, 1080)
             };
@@ -215,8 +238,17 @@ impl IndicatorState {
             } else {
                 1.0f32 // 1080p
             }
-        };
+        }
+    }
 
+    pub fn create_surface_for_output(&mut self, output: Option<&wl_output::WlOutput>) {
+        if let Some(out) = output {
+            if self.surfaces.iter().any(|s| s.output.as_ref() == Some(out)) {
+                return;
+            }
+        }
+
+        let ui_scale = self.compute_ui_scale(output);
         let logical_w = (LOGICAL_WIDTH as f32 * ui_scale).round() as u32;
         let logical_h = (LOGICAL_HEIGHT as f32 * ui_scale).round() as u32;
         let logical_margin = (12.0 * ui_scale).round() as i32;
@@ -269,6 +301,7 @@ impl IndicatorState {
         bg_cover_layer.commit();
 
         self.surfaces.push(MonitorSurface {
+            output: output.cloned(),
             indicator_layer,
             bg_cover_layer,
             scale: 1,
@@ -304,9 +337,8 @@ impl IndicatorState {
                     stride,
                     wl_shm::Format::Argb8888,
                 ) {
-                    if is_hidden {
-                        canvas.fill(0);
-                    } else {
+                    canvas.fill(0);
+                    if !is_hidden {
                         render_indicator_pill(
                             canvas,
                             phys_w as u32,
@@ -531,13 +563,8 @@ pub fn run_indicator(
 
     let _ = event_queue.roundtrip(&mut state);
 
-    let outputs: Vec<wl_output::WlOutput> = state.output_state.outputs().collect();
-    if outputs.is_empty() {
+    if state.surfaces.is_empty() {
         state.create_surface_for_output(None);
-    } else {
-        for output in outputs {
-            state.create_surface_for_output(Some(&output));
-        }
     }
 
     let _ = event_queue.roundtrip(&mut state);
@@ -735,15 +762,15 @@ mod tests {
 
     #[test]
     fn test_render_pill() {
-        let w = 78;
-        let h = 24;
+        let w = 172;
+        let h = 53;
         let mut canvas = vec![0u8; (w * h * 4) as usize];
-        render_indicator_pill(&mut canvas, w, h, 1.0, false, 45);
+        render_indicator_pill(&mut canvas, w, h, 2.2, false, 45);
         let non_zero = canvas.iter().any(|&b| b > 0);
         assert!(non_zero);
 
         // Test paused
-        render_indicator_pill(&mut canvas, w, h, 1.0, true, -1);
+        render_indicator_pill(&mut canvas, w, h, 2.2, true, -1);
         let non_zero_paused = canvas.iter().any(|&b| b > 0);
         assert!(non_zero_paused);
     }

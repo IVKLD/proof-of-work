@@ -101,64 +101,6 @@ pub fn get_all_workspaces() -> Result<Vec<Workspace>, Box<dyn std::error::Error>
     Ok(list)
 }
 
-pub fn patch_config_no_animations(content: &str) -> String {
-    if content.contains("workspace-switch { off; }")
-        || content.contains("workspace-switch {off;}")
-        || content.contains("workspace-switch {\n\toff\n}")
-    {
-        content.to_string()
-    } else if content.contains("animations {") {
-        content.replacen(
-            "animations {",
-            "animations {\n\tworkspace-switch { off; }",
-            1,
-        )
-    } else {
-        format!("animations {{\n\tworkspace-switch {{ off; }}\n}}\n{content}")
-    }
-}
-
-pub struct AnimationGuard {
-    active: bool,
-}
-
-impl AnimationGuard {
-    pub fn disable_workspace_animation() -> Self {
-        // Read user's niri config and load temporary config with workspace-switch { off; }
-        if let Ok(home) = std::env::var("HOME") {
-            let config_path = std::path::PathBuf::from(home).join(".config/niri/config.kdl");
-            if let Ok(content) = std::fs::read_to_string(&config_path) {
-                let temp_path = std::env::temp_dir().join("worktrack-niri-noanim.kdl");
-                let modified = patch_config_no_animations(&content);
-
-                if std::fs::write(&temp_path, modified).is_ok() {
-                    let path_str = temp_path.to_string_lossy().to_string();
-                    let status = Command::new("niri")
-                        .args(["msg", "action", "load-config-file", "--path", &path_str])
-                        .status();
-                    if status.is_ok_and(|s| s.success()) {
-                        return Self { active: true };
-                    }
-                }
-            }
-        }
-        Self { active: false }
-    }
-}
-
-impl Drop for AnimationGuard {
-    fn drop(&mut self) {
-        if self.active {
-            // Restore user's original config
-            let _ = Command::new("niri")
-                .args(["msg", "action", "load-config-file"])
-                .status();
-            let temp_path = std::env::temp_dir().join("worktrack-niri-noanim.kdl");
-            let _ = std::fs::remove_file(temp_path);
-        }
-    }
-}
-
 pub fn find_workspace(
     workspaces: &[Workspace],
     query: &str,
@@ -431,18 +373,5 @@ mod tests {
         // Not found
         let found = find_workspace(&workspaces, "nonexistent", None);
         assert!(found.is_none());
-    }
-
-    #[test]
-    fn test_patch_config_no_animations() {
-        let sample = "animations {\n\tslowdown 1.1\n}\nworkspace \"main\" {\n\topen-on-output \"DP-1\"\n}";
-        let patched = patch_config_no_animations(sample);
-        assert!(patched.contains("workspace-switch { off; }"));
-        assert!(patched.contains("slowdown 1.1"));
-
-        // If already disabled
-        let already = "animations {\n\tworkspace-switch { off; }\n}";
-        let patched2 = patch_config_no_animations(already);
-        assert_eq!(patched2, already);
     }
 }
