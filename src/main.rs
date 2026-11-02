@@ -170,15 +170,14 @@ fn run_daemon(cfg: Config) {
     let mut prev_paused = paused.load(Ordering::Relaxed);
 
     while running.load(Ordering::SeqCst) {
-        let today = Local::now().format("%Y-%m-%d").to_string();
-        let day_dir = cfg.dir.join(&today);
-        let _ = fs::create_dir_all(&day_dir);
-
         let is_paused = pause_file_path().exists();
         paused.store(is_paused, Ordering::Relaxed);
 
         if prev_paused != is_paused {
             prev_paused = is_paused;
+            let today = Local::now().format("%Y-%m-%d").to_string();
+            let day_dir = cfg.dir.join(&today);
+            let _ = fs::create_dir_all(&day_dir);
             if is_paused {
                 append_log(&day_dir, "PAUSE");
             } else {
@@ -192,6 +191,9 @@ fn run_daemon(cfg: Config) {
 
         if !is_paused && last_capture.elapsed() >= Duration::from_secs(cfg.interval_secs) {
             last_capture = std::time::Instant::now();
+            let today = Local::now().format("%Y-%m-%d").to_string();
+            let day_dir = cfg.dir.join(&today);
+            let _ = fs::create_dir_all(&day_dir);
             capture_screen(&day_dir, &cfg, &hidden);
         }
 

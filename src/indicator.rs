@@ -1,6 +1,7 @@
 use std::os::fd::{AsFd, AsRawFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -371,6 +372,8 @@ pub fn run_indicator(
     let raw_fd = conn.as_fd().as_raw_fd();
 
     while running.load(Ordering::Relaxed) {
+        let _ = event_queue.dispatch_pending(&mut state);
+
         let current_paused = state.paused.load(Ordering::Relaxed);
         let current_hidden = state.hidden.load(Ordering::Relaxed) || hide_file.exists();
 
@@ -390,10 +393,13 @@ pub fn run_indicator(
                 revents: 0,
             };
 
-            let poll_ret = unsafe { libc::poll(&mut poll_fd, 1, 20) };
+            let poll_ret = unsafe { libc::poll(&mut poll_fd, 1, 100) };
             if poll_ret > 0 {
                 let _ = guard.read();
             }
+        } else {
+            // Prevent busy spinning if prepare_read is None
+            std::thread::sleep(Duration::from_millis(50));
         }
 
         let _ = event_queue.dispatch_pending(&mut state);
