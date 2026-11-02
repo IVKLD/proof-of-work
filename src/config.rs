@@ -7,6 +7,7 @@ pub struct Config {
     pub interval_secs: u64,
     pub output: Option<String>,
     pub workspace: Option<String>,
+    pub scale: Option<f32>,
     pub upload_cmd: Option<String>,
     pub blocked_apps: Vec<String>,
 }
@@ -35,6 +36,7 @@ impl Default for Config {
             interval_secs: 60,
             output: None,
             workspace: None,
+            scale: None,
             upload_cmd: None,
             blocked_apps: Vec::new(),
         }
@@ -69,6 +71,11 @@ impl Config {
                             }
                             "WORKTRACK_WORKSPACE" if !val.is_empty() => {
                                 cfg.workspace = Some(val.to_string());
+                            }
+                            "WORKTRACK_SCALE" => {
+                                if let Ok(s) = val.parse::<f32>() {
+                                    cfg.scale = Some(s);
+                                }
                             }
                             "WORKTRACK_UPLOAD_CMD" => cfg.upload_cmd = Some(val.to_string()),
                             "WORKTRACK_BLOCKED_APPS" => {
@@ -106,6 +113,12 @@ impl Config {
             if !trimmed.is_empty() {
                 cfg.workspace = Some(trimmed.to_string());
             }
+        }
+        if let Some(s) = std::env::var("WORKTRACK_SCALE")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+        {
+            cfg.scale = Some(s);
         }
         if let Ok(val) = std::env::var("WORKTRACK_UPLOAD_CMD") {
             cfg.upload_cmd = Some(val);

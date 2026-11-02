@@ -123,7 +123,7 @@ fn capture_screen(day_dir: &Path, cfg: &Config, hidden: Option<&Arc<AtomicBool>>
     let (
         target_output,
         target_ws_id,
-        needs_restore,
+        mut anim_guard,
         prev_win_id,
         prev_active_ws,
         prev_focused_output,
@@ -136,9 +136,10 @@ fn capture_screen(day_dir: &Path, cfg: &Config, hidden: Option<&Arc<AtomicBool>>
 
         if ws.is_active {
             // Workspace is already visible on its output: no switching needed!
-            (out_name, Some(ws.id), false, None, None, None)
+            (out_name, Some(ws.id), None, None, None, None)
         } else {
-            // Workspace is inactive: switch to it temporarily
+            // Workspace is inactive: switch to it temporarily without animation
+            let guard = niri::AnimationGuard::disable_workspace_animation();
             let prev_win = niri::get_focused_window_id();
             let prev_active = all_workspaces
                 .iter()
@@ -153,12 +154,12 @@ fn capture_screen(day_dir: &Path, cfg: &Config, hidden: Option<&Arc<AtomicBool>>
                 let _ = niri::focus_monitor(&out_name);
                 let _ = niri::focus_workspace(&idx.to_string());
             }
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(50));
 
             (
                 out_name,
                 Some(ws.id),
-                true,
+                Some(guard),
                 prev_win,
                 prev_active,
                 prev_focused_out,
@@ -176,7 +177,7 @@ fn capture_screen(day_dir: &Path, cfg: &Config, hidden: Option<&Arc<AtomicBool>>
             .clone()
             .or_else(|| niri::get_focused_output().map(|o| o.name))
             .unwrap_or_else(|| "DP-1".to_string());
-        (out_name, None, false, None, None, None)
+        (out_name, None, None, None, None, None)
     };
 
     // 2. Perform capture with Layer::Bottom occluding barrier
@@ -205,7 +206,7 @@ fn capture_screen(day_dir: &Path, cfg: &Config, hidden: Option<&Arc<AtomicBool>>
     };
 
     // 3. Restore previous workspace/window if we switched
-    if needs_restore {
+    if anim_guard.is_some() {
         if let Some(win_id) = prev_win_id {
             let _ = niri::focus_window(win_id);
         } else if let Some(prev_ws) = prev_active_ws {
@@ -225,6 +226,8 @@ fn capture_screen(day_dir: &Path, cfg: &Config, hidden: Option<&Arc<AtomicBool>>
         } else {
             let _ = niri::focus_workspace_previous();
         }
+        std::thread::sleep(Duration::from_millis(20));
+        let _ = anim_guard.take(); // restore animations
     }
 
     // 4. Apply watermark & blackout blocked apps if any
@@ -265,8 +268,9 @@ fn run_daemon(cfg: Config) {
     let ind_hidden = hidden.clone();
     let countdown = Arc::new(std::sync::atomic::AtomicI64::new(cfg.interval_secs as i64));
     let ind_countdown = countdown.clone();
+    let ind_scale = cfg.scale;
     let ind_thread = std::thread::spawn(move || {
-        indicator::run_indicator(ind_paused, ind_hidden, ind_running, ind_countdown);
+        indicator::run_indicator(ind_paused, ind_hidden, ind_running, ind_countdown, ind_scale);
     });
 
     let initial_day = Local::now().format("%Y-%m-%d").to_string();

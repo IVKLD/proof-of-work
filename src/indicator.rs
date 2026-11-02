@@ -36,6 +36,7 @@ pub struct MonitorSurface {
     pub indicator_layer: LayerSurface,
     pub bg_cover_layer: LayerSurface,
     pub scale: i32,
+    pub ui_scale: f32,
     pub indicator_configured: bool,
     pub bg_configured: bool,
     pub bg_width: u32,
@@ -55,6 +56,7 @@ pub struct IndicatorState {
     pub hidden: Arc<AtomicBool>,
     pub running: Arc<AtomicBool>,
     pub countdown: Arc<AtomicI64>,
+    pub scale_override: Option<f32>,
 }
 
 impl CompositorHandler for IndicatorState {
@@ -198,6 +200,27 @@ delegate_registry!(IndicatorState);
 
 impl IndicatorState {
     pub fn create_surface_for_output(&mut self, output: Option<&wl_output::WlOutput>) {
+        let ui_scale = if let Some(override_scale) = self.scale_override {
+            override_scale.max(0.5)
+        } else {
+            let (mon_w, mon_h) = if let Some(info) = output.and_then(|o| self.output_state.info(o)) {
+                info.logical_size.unwrap_or((1920, 1080))
+            } else {
+                (1920, 1080)
+            };
+            if mon_w >= 3840 || mon_h >= 2160 {
+                2.2f32 // 4K HiDPI
+            } else if mon_w >= 2560 || mon_h >= 1440 {
+                1.4f32 // QHD
+            } else {
+                1.0f32 // 1080p
+            }
+        };
+
+        let logical_w = (LOGICAL_WIDTH as f32 * ui_scale).round() as u32;
+        let logical_h = (LOGICAL_HEIGHT as f32 * ui_scale).round() as u32;
+        let logical_margin = (12.0 * ui_scale).round() as i32;
+
         // 1. Overlay indicator surface
         let ind_surface = self.compositor_state.create_surface(&self.qh);
         let indicator_layer = self.layer_shell.create_layer_surface(
@@ -208,9 +231,9 @@ impl IndicatorState {
             output,
         );
 
-        indicator_layer.set_size(LOGICAL_WIDTH, LOGICAL_HEIGHT);
+        indicator_layer.set_size(logical_w, logical_h);
         indicator_layer.set_anchor(Anchor::TOP | Anchor::RIGHT);
-        indicator_layer.set_margin(12, 12, 0, 0);
+        indicator_layer.set_margin(logical_margin, logical_margin, 0, 0);
         indicator_layer.set_keyboard_interactivity(KeyboardInteractivity::None);
 
         if let Ok(region) = smithay_client_toolkit::compositor::Region::new(&self.compositor_state)
@@ -249,6 +272,7 @@ impl IndicatorState {
             indicator_layer,
             bg_cover_layer,
             scale: 1,
+            ui_scale,
             indicator_configured: false,
             bg_configured: false,
             bg_width: 0,
@@ -269,8 +293,9 @@ impl IndicatorState {
             // 1. Draw indicator pill with countdown & dot
             if s.indicator_configured {
                 let scale = s.scale.max(1);
-                let phys_w = (LOGICAL_WIDTH as i32) * scale;
-                let phys_h = (LOGICAL_HEIGHT as i32) * scale;
+                let total_scale = s.ui_scale * (scale as f32);
+                let phys_w = (LOGICAL_WIDTH as f32 * total_scale).round() as i32;
+                let phys_h = (LOGICAL_HEIGHT as f32 * total_scale).round() as i32;
                 let stride = phys_w * 4;
 
                 if let Ok((buffer, canvas)) = self.pool.create_buffer(
@@ -286,7 +311,7 @@ impl IndicatorState {
                             canvas,
                             phys_w as u32,
                             phys_h as u32,
-                            scale,
+                            total_scale,
                             is_paused,
                             remaining,
                         );
@@ -344,7 +369,7 @@ pub fn render_indicator_pill(
     canvas: &mut [u8],
     w: u32,
     h: u32,
-    scale: i32,
+    total_scale: f32,
     is_paused: bool,
     remaining: i64,
 ) {
@@ -352,7 +377,6 @@ pub fn render_indicator_pill(
     let w_f = w as f32;
     let h_f = h as f32;
     let r_f = h_f / 2.0;
-    let scale_f = scale as f32;
 
     // 1. Rounded pill background with subtle dark glass appearance
     for y in 0..h {
@@ -362,10 +386,10 @@ pub fn render_indicator_pill(
             let dist = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
             let alpha = (r_f + 0.5 - dist).clamp(0.0, 1.0);
             if alpha > 0.0 {
-                let border_width = 1.2 * scale_f;
+                let border_width = 1.3 * total_scale;
                 let is_border = dist >= (r_f - border_width);
                 let (bg_r, bg_g, bg_b, bg_a) = if is_border {
-                    (65u8, 65u8, 75u8, (220.0 * alpha) as u8)
+                    (70u8, 70u8, 80u8, (220.0 * alpha) as u8)
                 } else {
                     (18u8, 18u8, 22u8, (200.0 * alpha) as u8)
                 };
@@ -384,13 +408,13 @@ pub fn render_indicator_pill(
     };
 
     if let Ok(font) = FontRef::try_from_slice(FONT_DATA) {
-        let font_scale = PxScale::from(12.0 * scale_f);
+        let font_scale = PxScale::from(12.0 * total_scale);
         let (_tw, th) = text_size(font_scale, &font, &text);
-        let tx = (9.0 * scale_f).round() as i32;
+        let tx = (9.0 * total_scale).round() as i32;
         let ty = ((h_f - th as f32) / 2.0).round() as i32;
         draw_text_mut(
             &mut img,
-            image::Rgba([235, 235, 240, 255]),
+            image::Rgba([240, 240, 245, 255]),
             tx,
             ty,
             font_scale,
@@ -400,9 +424,9 @@ pub fn render_indicator_pill(
     }
 
     // 3. Status indicator dot (red or amber)
-    let dot_cx = w_f - (12.0 * scale_f);
+    let dot_cx = w_f - (12.0 * total_scale);
     let dot_cy = h_f / 2.0;
-    let dot_radius = 4.2 * scale_f;
+    let dot_radius = 4.2 * total_scale;
     let (base_r, base_g, base_b) = if is_paused {
         (244.0f32, 162.0f32, 97.0f32) // Amber
     } else {
@@ -457,6 +481,7 @@ pub fn run_indicator(
     hidden: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     countdown: Arc<AtomicI64>,
+    scale_override: Option<f32>,
 ) {
     let conn = match Connection::connect_to_env() {
         Ok(c) => c,
@@ -501,6 +526,7 @@ pub fn run_indicator(
         hidden,
         running: running.clone(),
         countdown,
+        scale_override,
     };
 
     let _ = event_queue.roundtrip(&mut state);
@@ -712,12 +738,12 @@ mod tests {
         let w = 78;
         let h = 24;
         let mut canvas = vec![0u8; (w * h * 4) as usize];
-        render_indicator_pill(&mut canvas, w, h, 1, false, 45);
+        render_indicator_pill(&mut canvas, w, h, 1.0, false, 45);
         let non_zero = canvas.iter().any(|&b| b > 0);
         assert!(non_zero);
 
         // Test paused
-        render_indicator_pill(&mut canvas, w, h, 1, true, -1);
+        render_indicator_pill(&mut canvas, w, h, 1.0, true, -1);
         let non_zero_paused = canvas.iter().any(|&b| b > 0);
         assert!(non_zero_paused);
     }

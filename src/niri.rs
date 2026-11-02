@@ -101,6 +101,59 @@ pub fn get_all_workspaces() -> Result<Vec<Workspace>, Box<dyn std::error::Error>
     Ok(list)
 }
 
+pub struct AnimationGuard {
+    active: bool,
+}
+
+impl AnimationGuard {
+    pub fn disable_workspace_animation() -> Self {
+        // Read user's niri config and load temporary config with workspace-switch { off }
+        if let Ok(home) = std::env::var("HOME") {
+            let config_path = std::path::PathBuf::from(home).join(".config/niri/config.kdl");
+            if let Ok(content) = std::fs::read_to_string(&config_path) {
+                let temp_path = std::env::temp_dir().join("worktrack-niri-noanim.kdl");
+                let modified = if content.contains("workspace-switch { off }")
+                    || content.contains("workspace-switch {off}")
+                {
+                    content
+                } else if content.contains("animations {") {
+                    content.replacen(
+                        "animations {",
+                        "animations {\n\tworkspace-switch { off }",
+                        1,
+                    )
+                } else {
+                    format!("animations {{\n\tworkspace-switch {{ off }}\n}}\n{content}")
+                };
+
+                if std::fs::write(&temp_path, modified).is_ok() {
+                    let path_str = temp_path.to_string_lossy().to_string();
+                    let status = Command::new("niri")
+                        .args(["msg", "action", "load-config-file", "--path", &path_str])
+                        .status();
+                    if status.is_ok_and(|s| s.success()) {
+                        return Self { active: true };
+                    }
+                }
+            }
+        }
+        Self { active: false }
+    }
+}
+
+impl Drop for AnimationGuard {
+    fn drop(&mut self) {
+        if self.active {
+            // Restore user's original config
+            let _ = Command::new("niri")
+                .args(["msg", "action", "load-config-file"])
+                .status();
+            let temp_path = std::env::temp_dir().join("worktrack-niri-noanim.kdl");
+            let _ = std::fs::remove_file(temp_path);
+        }
+    }
+}
+
 pub fn find_workspace(
     workspaces: &[Workspace],
     query: &str,
