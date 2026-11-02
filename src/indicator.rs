@@ -212,7 +212,11 @@ impl IndicatorState {
 
     pub fn draw_all(&mut self) {
         let is_paused = self.paused.load(Ordering::Relaxed);
-        let is_hidden = self.hidden.load(Ordering::Relaxed);
+        let hide_file = std::env::var("XDG_RUNTIME_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+            .join("worktrack.hide");
+        let is_hidden = self.hidden.load(Ordering::Relaxed) || hide_file.exists();
 
         // Vibrant Red: recording (#e63946)
         // Warm Amber/Yellow: paused (#f4a261)
@@ -357,13 +361,18 @@ pub fn run_indicator(
 
     let _ = event_queue.roundtrip(&mut state);
 
+    let hide_file = std::env::var("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+        .join("worktrack.hide");
+
     let mut last_paused = state.paused.load(Ordering::Relaxed);
-    let mut last_hidden = state.hidden.load(Ordering::Relaxed);
+    let mut last_hidden = state.hidden.load(Ordering::Relaxed) || hide_file.exists();
     let raw_fd = conn.as_fd().as_raw_fd();
 
     while running.load(Ordering::Relaxed) {
         let current_paused = state.paused.load(Ordering::Relaxed);
-        let current_hidden = state.hidden.load(Ordering::Relaxed);
+        let current_hidden = state.hidden.load(Ordering::Relaxed) || hide_file.exists();
 
         if current_paused != last_paused || current_hidden != last_hidden {
             last_paused = current_paused;

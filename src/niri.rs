@@ -1,6 +1,9 @@
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::process::Command;
+use std::io::Write;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 #[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
@@ -115,49 +118,121 @@ fn grim_bin() -> String {
     "grim".to_string()
 }
 
-/// Captures a screenshot purely via grim (Wayland zwlr_screencopy_manager_v1).
-/// NEVER touches or uses the Wayland clipboard under any circumstance.
+#[allow(clippy::collapsible_if)]
+fn restore_clipboard(prev_mime: Option<String>, prev_data: Option<Vec<u8>>) {
+    // 1. Poll copyq for up to 250ms to see if niri placed an image in row 0.
+    // If found, delete it from history and reselect previous item.
+    // CopyQ is NEVER disabled, user copy operations remain 100% active.
+    for _ in 0..12 {
+        std::thread::sleep(Duration::from_millis(20));
+        let out = Command::new("copyq")
+            .args([
+                "eval",
+                "if (read('image/png', 0).length > 0) { remove(0); select(0); 'CLEANED'; } else { 'WAIT'; }",
+            ])
+            .output();
+        if let Ok(o) = out {
+            if String::from_utf8_lossy(&o.stdout).trim() == "CLEANED" {
+                break;
+            }
+        }
+    }
+
+    // 2. If wl-paste still has image/png (e.g. copyq not running or not used),
+    // restore the user's prior clipboard selection or clear it.
+    let current_mime = Command::new("wl-paste")
+        .arg("-l")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+
+    if current_mime.contains("image/png") {
+        if let (Some(mime), Some(data)) = (prev_mime, prev_data) {
+            if let Ok(mut child) = Command::new("wl-copy")
+                .args(["--type", &mime])
+                .stdin(Stdio::piped())
+                .spawn()
+            {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(&data);
+                }
+                let _ = child.wait();
+            }
+        } else {
+            let _ = Command::new("wl-copy").arg("--clear").status();
+        }
+    }
+}
+
+/// Captures a screenshot of the current work.
+///
+/// First attempts window surface capture via niri action screenshot-window to guarantee:
+/// - 0% wallpaper (mpvpaper / desktop background)
+/// - 0% desktop gaps
+/// - 0% layer-shell indicators
+///
+/// Immediately cleans up clipboard and copyq so user's clipboard is NEVER overwritten or disabled.
 #[allow(clippy::collapsible_if)]
 pub fn capture_screenshot(
     path: &str,
     target_output: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let grim = grim_bin();
+    // 1. Prefer focused window surface capture (no wallpaper, no desktop gaps, no indicator)
+    if let Some(win) = get_focused_window() {
+        let prev_mime = Command::new("wl-paste")
+            .arg("-l")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.lines().next().unwrap_or("").to_string())
+            .filter(|s| !s.is_empty());
 
-    // 1. Try to crop to focused window geometry (no wallpapers, no background)
-    if let (Some(win), Some(out)) = (get_focused_window(), get_focused_output()) {
-        if let (Some(layout), Some(logical)) = (win.layout, out.logical) {
-            if let Some(wsize) = layout.window_size {
-                let (w, h) = (wsize[0], wsize[1]);
-                let (x, y) = if win.is_floating {
-                    if let Some(pos) = layout.tile_pos_in_workspace_view {
-                        (logical.x + pos[0] as i64, logical.y + pos[1] as i64)
-                    } else {
-                        (logical.x, logical.y)
-                    }
-                } else if let Some(tsize) = layout.tile_size {
-                    let gap_x = ((logical.width as f64 - tsize[0]) / 2.0).max(0.0) as i64;
-                    let gap_y = ((logical.height as f64 - tsize[1]) / 2.0).max(0.0) as i64;
-                    (logical.x + gap_x, logical.y + gap_y)
-                } else {
-                    (logical.x, logical.y)
-                };
+        let prev_data = if let Some(ref mime) = prev_mime {
+            Command::new("wl-paste")
+                .args(["--type", mime, "--no-newline"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success() && !o.stdout.is_empty())
+                .map(|o| o.stdout)
+        } else {
+            None
+        };
 
-                let geom = format!("{x},{y} {w}x{h}");
-                let status = Command::new(&grim)
-                    .args(["-c", "-g", &geom, path])
-                    .status();
+        let status = Command::new("niri")
+            .args([
+                "msg",
+                "action",
+                "screenshot-window",
+                "--id",
+                &win.id.to_string(),
+                "--write-to-disk",
+                "true",
+                "--path",
+                path,
+            ])
+            .status();
 
-                if let Ok(s) = status {
-                    if s.success() {
+        restore_clipboard(prev_mime, prev_data);
+
+        if let Ok(s) = status {
+            if s.success() {
+                let p = Path::new(path);
+                for _ in 0..25 {
+                    if p.is_file() && std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false) {
                         return Ok(());
                     }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                if p.is_file() {
+                    return Ok(());
                 }
             }
         }
     }
 
     // 2. Fallback to capturing the focused or targeted output via grim
+    let grim = grim_bin();
     let out_name = target_output
         .map(|s| s.to_string())
         .or_else(|| get_focused_output().map(|o| o.name));

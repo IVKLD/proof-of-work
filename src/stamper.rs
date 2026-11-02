@@ -12,6 +12,13 @@ pub fn stamp_screenshot(path: &Path, text: &str) -> Result<(), Box<dyn std::erro
     let mut img: RgbaImage = image::open(path)?.to_rgba8();
     let (width, height) = img.dimensions();
 
+    // Ensure fully opaque (alpha = 255) for all pixels so semi-transparent windows
+    // (e.g. Kitty terminal with background_opacity 0.8) are rendered as solid opaque surfaces
+    // without any transparency or wallpaper showing through.
+    for p in img.pixels_mut() {
+        p[3] = 255;
+    }
+
     let font = FontRef::try_from_slice(FONT_DATA)?;
     let scale = PxScale::from(22.0);
 

@@ -104,9 +104,11 @@ fn append_log(day_dir: &Path, msg: &str) {
 fn capture_screen(day_dir: &Path, output: Option<&str>, hidden: &Arc<AtomicBool>) {
     // 1. Temporarily hide indicator so it is NEVER present on the screenshot
     hidden.store(true, Ordering::SeqCst);
-    std::thread::sleep(Duration::from_millis(40));
+    let hide_file = runtime_dir().join("worktrack.hide");
+    let _ = fs::File::create(&hide_file);
+    std::thread::sleep(Duration::from_millis(50));
 
-    // 2. Take screenshot via grim (pure screencopy, zero clipboard)
+    // 2. Take screenshot
     let now_stamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let time_str = Local::now().format("%H-%M-%S").to_string();
 
@@ -118,6 +120,7 @@ fn capture_screen(day_dir: &Path, output: Option<&str>, hidden: &Arc<AtomicBool>
 
     // 3. Immediately restore the indicator on screen
     hidden.store(false, Ordering::SeqCst);
+    let _ = fs::remove_file(&hide_file);
 
     if res {
         if stamper::stamp_screenshot(&file_path, &now_stamp).is_err() {
