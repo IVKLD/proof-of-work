@@ -139,7 +139,7 @@ fn capture_screen(day_dir: &Path, cfg: &Config, hidden: Option<&Arc<AtomicBool>>
             (out_name, Some(ws.id), false, None, None, None)
         } else {
             // Workspace is inactive: switch to it temporarily
-            let prev_win = niri::get_focused_window().map(|w| w.id);
+            let prev_win = niri::get_focused_window_id();
             let prev_active = all_workspaces
                 .iter()
                 .find(|w| w.output.as_deref() == Some(&out_name) && w.is_active)

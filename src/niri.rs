@@ -3,17 +3,12 @@ use std::collections::HashMap;
 use std::process::Command;
 
 #[derive(Debug, Deserialize, Clone)]
-#[allow(dead_code)]
 pub struct LogicalOutput {
-    pub x: i64,
-    pub y: i64,
     pub width: u64,
     pub height: u64,
-    pub scale: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-#[allow(dead_code)]
 pub struct OutputInfo {
     pub name: String,
     pub make: Option<String>,
@@ -22,42 +17,14 @@ pub struct OutputInfo {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-#[allow(dead_code)]
-pub struct WindowLayout {
-    pub pos_in_scrolling_layout: Option<[i64; 2]>,
-    pub tile_size: Option<[f64; 2]>,
-    pub window_size: Option<[u64; 2]>,
-    pub tile_pos_in_workspace_view: Option<[f64; 2]>,
-    pub window_offset_in_tile: Option<[f64; 2]>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-#[allow(dead_code)]
-pub struct FocusedWindow {
-    pub id: u64,
-    pub title: Option<String>,
-    pub app_id: Option<String>,
-    pub workspace_id: Option<u64>,
-    pub is_floating: bool,
-    pub layout: Option<WindowLayout>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
 pub struct Window {
     pub id: u64,
     pub title: Option<String>,
     pub app_id: Option<String>,
     pub workspace_id: Option<u64>,
-    #[serde(default)]
-    pub is_floating: bool,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub is_focused: bool,
-    pub layout: Option<WindowLayout>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-#[allow(dead_code)]
 pub struct Workspace {
     pub id: u64,
     pub idx: Option<u64>,
@@ -65,7 +32,6 @@ pub struct Workspace {
     pub output: Option<String>,
     pub is_active: bool,
     pub is_focused: bool,
-    pub active_window_id: Option<u64>,
 }
 
 pub fn get_focused_output() -> Option<OutputInfo> {
@@ -79,8 +45,12 @@ pub fn get_focused_output() -> Option<OutputInfo> {
     serde_json::from_slice(&output.stdout).ok()
 }
 
-#[allow(dead_code)]
-pub fn get_focused_window() -> Option<FocusedWindow> {
+#[derive(Debug, Deserialize)]
+struct FocusedWindowInfo {
+    id: u64,
+}
+
+pub fn get_focused_window_id() -> Option<u64> {
     let output = Command::new("niri")
         .args(["msg", "-j", "focused-window"])
         .output()
@@ -88,7 +58,9 @@ pub fn get_focused_window() -> Option<FocusedWindow> {
     if !output.status.success() {
         return None;
     }
-    serde_json::from_slice(&output.stdout).ok()
+    serde_json::from_slice::<FocusedWindowInfo>(&output.stdout)
+        .ok()
+        .map(|w| w.id)
 }
 
 pub fn get_all_outputs() -> Result<Vec<OutputInfo>, Box<dyn std::error::Error>> {
@@ -297,165 +269,30 @@ pub fn get_blocked_window_rects_for_workspace(
         return Vec::new();
     }
 
-    let outputs = match get_all_outputs() {
-        Ok(o) => o,
-        Err(_) => return Vec::new(),
-    };
-    let out_info = match outputs.into_iter().find(|o| o.name == target_output) {
-        Some(o) => o,
-        None => return Vec::new(),
-    };
-    let logical = match out_info.logical {
-        Some(l) => l,
-        None => return Vec::new(),
-    };
-    let mon_w = logical.width as f64;
-    let mon_h = logical.height as f64;
-
-    let workspaces = match get_all_workspaces() {
-        Ok(w) => w,
-        Err(_) => return Vec::new(),
-    };
-    let target_ws = match workspaces.into_iter().find(|w| w.id == target_ws_id) {
-        Some(w) => w,
-        None => return Vec::new(),
-    };
-
     let all_windows = match get_all_windows() {
         Ok(w) => w,
         Err(_) => return Vec::new(),
     };
 
-    let ws_windows: Vec<Window> = all_windows
+    let has_blocked = all_windows
+        .iter()
+        .any(|w| w.workspace_id == Some(target_ws_id) && is_window_blocked(w, blocked_apps));
+
+    if !has_blocked {
+        return Vec::new();
+    }
+
+    // A forbidden application is detected on the captured workspace:
+    // Black out the entire screen to guarantee privacy without guessing partial scroll offsets.
+    let outputs = get_all_outputs().unwrap_or_default();
+    if let Some(logical) = outputs
         .into_iter()
-        .filter(|w| w.workspace_id == Some(target_ws.id))
-        .collect();
-
-    let gap = 8.0f64;
-    let mut blocked_rects = Vec::new();
-
-    // 1. Check floating windows
-    for win in ws_windows.iter().filter(|w| w.is_floating) {
-        if !is_window_blocked(win, blocked_apps) {
-            continue;
-        }
-        if let Some(ref layout) = win.layout {
-            let (fx, fy) = if let Some(pos) = layout.tile_pos_in_workspace_view {
-                (pos[0], pos[1])
-            } else {
-                (gap, gap)
-            };
-            let (w, h) = if let Some(size) = layout.window_size {
-                (size[0] as f64, size[1] as f64)
-            } else {
-                (800.0, 600.0)
-            };
-
-            let x0 = fx.max(0.0) as u32;
-            let y0 = fy.max(0.0) as u32;
-            let x1 = (fx + w).min(mon_w).max(0.0) as u32;
-            let y1 = (fy + h).min(mon_h).max(0.0) as u32;
-            if x1 > x0 && y1 > y0 {
-                blocked_rects.push([x0, y0, x1 - x0, y1 - y0]);
-            }
-        }
+        .find(|o| o.name == target_output)
+        .and_then(|o| o.logical)
+    {
+        return vec![[0, 0, logical.width as u32, logical.height as u32]];
     }
-
-    // 2. Check tiled windows in scrolling layout
-    let tiled_windows: Vec<&Window> = ws_windows.iter().filter(|w| !w.is_floating).collect();
-    if tiled_windows.is_empty() {
-        return blocked_rects;
-    }
-
-    // Group by column
-    let mut cols: HashMap<i64, Vec<&Window>> = HashMap::new();
-    for win in &tiled_windows {
-        let col = win
-            .layout
-            .as_ref()
-            .and_then(|l| l.pos_in_scrolling_layout)
-            .map(|p| p[0])
-            .unwrap_or(1);
-        cols.entry(col).or_default().push(win);
-    }
-
-    let mut sorted_cols: Vec<i64> = cols.keys().copied().collect();
-    sorted_cols.sort_unstable();
-
-    // Calculate column X positions and widths
-    let mut col_x: HashMap<i64, f64> = HashMap::new();
-    let mut col_w: HashMap<i64, f64> = HashMap::new();
-    let mut cur_x = gap;
-
-    for &c in &sorted_cols {
-        let w_list = &cols[&c];
-        let cw = w_list
-            .iter()
-            .filter_map(|w| w.layout.as_ref()?.tile_size.map(|s| s[0]))
-            .fold(mon_w - 2.0 * gap, f64::max);
-        col_x.insert(c, cur_x);
-        col_w.insert(c, cw);
-        cur_x += cw + gap;
-    }
-
-    // Find active column
-    let mut active_col = sorted_cols.first().copied().unwrap_or(1);
-    if let Some(act_id) = target_ws.active_window_id {
-        for (&c, w_list) in &cols {
-            if w_list.iter().any(|w| w.id == act_id) {
-                active_col = c;
-                break;
-            }
-        }
-    }
-
-    // Compute scroll_x (minimal scroll to keep active column on screen)
-    let mut scroll_x = 0.0f64;
-    if let (Some(&c_left), Some(&cw)) = (col_x.get(&active_col), col_w.get(&active_col)) {
-        let c_right = c_left + cw;
-        if c_right > mon_w - gap {
-            scroll_x = c_right - (mon_w - gap);
-        }
-    }
-
-    // Check each window
-    for &c in &sorted_cols {
-        let scr_x = col_x[&c] - scroll_x;
-        let mut w_list = cols[&c].clone();
-        w_list.sort_by_key(|w| {
-            w.layout
-                .as_ref()
-                .and_then(|l| l.pos_in_scrolling_layout)
-                .map(|p| p[1])
-                .unwrap_or(1)
-        });
-
-        let mut cur_y = gap;
-        for w in w_list {
-            let (win_w, win_h) = if let Some(ref l) = w.layout {
-                let ts = l.tile_size.unwrap_or([col_w[&c], mon_h - 2.0 * gap]);
-                (ts[0], ts[1])
-            } else {
-                (col_w[&c], mon_h - 2.0 * gap)
-            };
-
-            let is_blocked = is_window_blocked(w, blocked_apps);
-            if is_blocked {
-                let x0 = scr_x.max(0.0) as u32;
-                let y0 = cur_y.max(0.0) as u32;
-                let x1 = (scr_x + win_w).min(mon_w).max(0.0) as u32;
-                let y1 = (cur_y + win_h).min(mon_h).max(0.0) as u32;
-
-                if x1 > x0 && y1 > y0 {
-                    blocked_rects.push([x0, y0, x1 - x0, y1 - y0]);
-                }
-            }
-
-            cur_y += win_h + gap;
-        }
-    }
-
-    blocked_rects
+    vec![[0, 0, 3840, 2160]]
 }
 
 /// Captures a screenshot of the specified output (or the focused output if None).
@@ -499,7 +336,6 @@ mod tests {
                 output: Some("DP-2".to_string()),
                 is_active: false,
                 is_focused: false,
-                active_window_id: None,
             },
             Workspace {
                 id: 2,
@@ -508,7 +344,6 @@ mod tests {
                 output: Some("DP-1".to_string()),
                 is_active: true,
                 is_focused: true,
-                active_window_id: None,
             },
             Workspace {
                 id: 3,
@@ -517,7 +352,6 @@ mod tests {
                 output: Some("DP-1".to_string()),
                 is_active: false,
                 is_focused: false,
-                active_window_id: None,
             },
         ];
 
