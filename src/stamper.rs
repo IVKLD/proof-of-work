@@ -1,5 +1,5 @@
 use ab_glyph::{FontRef, PxScale};
-use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+use image::codecs::png::PngEncoder;
 use image::{ImageEncoder, Rgba, RgbaImage};
 use imageproc::drawing::{draw_filled_rect_mut, draw_text_mut, text_size};
 use imageproc::rect::Rect;
@@ -51,7 +51,7 @@ pub fn stamp_screenshot(path: &Path, text: &str) -> Result<(), Box<dyn std::erro
 
     let file = File::create(path)?;
     let writer = BufWriter::new(file);
-    let encoder = PngEncoder::new_with_quality(writer, CompressionType::Fast, FilterType::NoFilter);
+    let encoder = PngEncoder::new(writer);
     encoder.write_image(&img, width, height, image::ExtendedColorType::Rgba8)?;
 
     Ok(())
