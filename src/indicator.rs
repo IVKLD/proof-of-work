@@ -34,6 +34,7 @@ const FONT_DATA: &[u8] = include_bytes!("../assets/font.ttf");
 
 pub struct MonitorSurface {
     pub output: Option<wl_output::WlOutput>,
+    pub output_name: Option<String>,
     pub indicator_layer: LayerSurface,
     pub bg_cover_layer: LayerSurface,
     pub scale: i32,
@@ -58,6 +59,7 @@ pub struct IndicatorState {
     pub running: Arc<AtomicBool>,
     pub countdown: Arc<AtomicI64>,
     pub scale_override: Option<f32>,
+    pub target_output: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl CompositorHandler for IndicatorState {
@@ -136,8 +138,12 @@ impl OutputHandler for IndicatorState {
         output: wl_output::WlOutput,
     ) {
         let new_ui_scale = self.compute_ui_scale(Some(&output));
+        let out_name = self.output_state.info(&output).and_then(|i| i.name);
         for s in &mut self.surfaces {
             if s.output.as_ref() == Some(&output) {
+                if s.output_name.is_none() && out_name.is_some() {
+                    s.output_name = out_name.clone();
+                }
                 if (s.ui_scale - new_ui_scale).abs() > 0.01 {
                     s.ui_scale = new_ui_scale;
                     let logical_w = (LOGICAL_WIDTH as f32 * new_ui_scale).round() as u32;
@@ -300,8 +306,13 @@ impl IndicatorState {
 
         bg_cover_layer.commit();
 
+        let output_name = output
+            .and_then(|o| self.output_state.info(o))
+            .and_then(|i| i.name);
+
         self.surfaces.push(MonitorSurface {
             output: output.cloned(),
+            output_name,
             indicator_layer,
             bg_cover_layer,
             scale: 1,
@@ -321,8 +332,16 @@ impl IndicatorState {
             .join("worktrack.hide");
         let is_hidden = self.hidden.load(Ordering::Relaxed) || hide_file.exists();
         let remaining = self.countdown.load(Ordering::Relaxed);
+        let current_target = self.target_output.read().ok().and_then(|g| g.clone());
 
         for s in &mut self.surfaces {
+            // Check if this surface is on the target screen
+            let is_target_screen = match (&s.output_name, &current_target) {
+                (Some(name), Some(target)) => name == target,
+                (None, Some(_)) => false,
+                (_, None) => true,
+            };
+
             // 1. Draw indicator pill with countdown & dot
             if s.indicator_configured {
                 let scale = s.scale.max(1);
@@ -338,7 +357,7 @@ impl IndicatorState {
                     wl_shm::Format::Argb8888,
                 ) {
                     canvas.fill(0);
-                    if !is_hidden {
+                    if !is_hidden && is_target_screen {
                         render_indicator_pill(
                             canvas,
                             phys_w as u32,
@@ -514,6 +533,7 @@ pub fn run_indicator(
     running: Arc<AtomicBool>,
     countdown: Arc<AtomicI64>,
     scale_override: Option<f32>,
+    target_output: Arc<std::sync::RwLock<Option<String>>>,
 ) {
     let conn = match Connection::connect_to_env() {
         Ok(c) => c,
@@ -559,6 +579,7 @@ pub fn run_indicator(
         running: running.clone(),
         countdown,
         scale_override,
+        target_output,
     };
 
     let _ = event_queue.roundtrip(&mut state);
@@ -577,6 +598,7 @@ pub fn run_indicator(
     let mut last_paused = state.paused.load(Ordering::Relaxed);
     let mut last_hidden = state.hidden.load(Ordering::Relaxed) || hide_file.exists();
     let mut last_countdown = state.countdown.load(Ordering::Relaxed);
+    let mut last_target = state.target_output.read().ok().and_then(|g| g.clone());
     let raw_fd = conn.as_fd().as_raw_fd();
 
     while running.load(Ordering::Relaxed) {
@@ -585,11 +607,17 @@ pub fn run_indicator(
         let current_paused = state.paused.load(Ordering::Relaxed);
         let current_hidden = state.hidden.load(Ordering::Relaxed) || hide_file.exists();
         let current_countdown = state.countdown.load(Ordering::Relaxed);
+        let current_target = state.target_output.read().ok().and_then(|g| g.clone());
 
-        if current_paused != last_paused || current_hidden != last_hidden || current_countdown != last_countdown {
+        if current_paused != last_paused
+            || current_hidden != last_hidden
+            || current_countdown != last_countdown
+            || current_target != last_target
+        {
             last_paused = current_paused;
             last_hidden = current_hidden;
             last_countdown = current_countdown;
+            last_target = current_target;
             state.draw_all();
             let _ = conn.flush();
         }
