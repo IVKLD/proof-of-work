@@ -199,28 +199,6 @@ pub fn focus_monitor(output: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-pub fn grim_bin() -> &'static str {
-    static CACHED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    CACHED.get_or_init(|| {
-        if Command::new("grim").arg("-h").output().is_ok() {
-            return "grim".to_string();
-        }
-        if let Ok(entries) = std::fs::read_dir("/nix/store") {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = path.file_name().unwrap_or_default().to_string_lossy();
-                if name.contains("-grim-") {
-                    let bin = path.join("bin/grim");
-                    if bin.is_file() {
-                        return bin.to_string_lossy().to_string();
-                    }
-                }
-            }
-        }
-        "grim".to_string()
-    })
-}
-
 pub fn is_window_blocked(win: &Window, blocked_apps: &[String]) -> bool {
     if blocked_apps.is_empty() {
         return false;
@@ -306,13 +284,12 @@ pub fn capture_screenshot(
     path: &str,
     target_output: Option<&str>,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let grim = grim_bin();
     let out_name = target_output
         .map(|s| s.to_string())
         .or_else(|| get_focused_output().map(|o| o.name))
         .ok_or("No active output found")?;
 
-    let mut cmd = Command::new(grim);
+    let mut cmd = Command::new("grim");
     cmd.arg("-c");
     cmd.args(["-o", &out_name]);
     cmd.arg(path);
