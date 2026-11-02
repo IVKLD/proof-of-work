@@ -46,6 +46,8 @@ enum Commands {
     Status,
     /// Показать открытые окна
     Windows,
+    /// Показать доступные мониторы для WORKTRACK_OUTPUT
+    Outputs,
     /// Собрать архив за сегодняшний день
     Pack,
     /// Выгрузить архив за сегодняшний день
@@ -108,11 +110,18 @@ fn capture_screen(day_dir: &Path, output: Option<&str>) {
     let file_str = file_path.to_string_lossy().to_string();
 
     let res = if let Some(out) = output {
-        Command::new("grim")
-            .args(["-o", out, &file_str])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        let _ = Command::new("niri")
+            .args(["msg", "action", "focus-monitor", out])
+            .status();
+        if niri::screenshot_screen(&file_str).is_ok() {
+            true
+        } else {
+            Command::new("grim")
+                .args(["-o", out, &file_str])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        }
     } else {
         niri::screenshot_screen(&file_str).is_ok()
     };
@@ -333,6 +342,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let app = w.app_id.as_deref().unwrap_or("<unknown>");
                 let title = w.title.as_deref().unwrap_or("");
                 println!("{:<10} {:<28} {}", w.id, app, title);
+            }
+        }
+
+        Some(Commands::Outputs) => {
+            let outputs = niri::get_all_outputs()?;
+            println!("{:<12} {:<20} MODEL", "NAME", "MAKE");
+            println!("{}", "-".repeat(50));
+            for o in outputs {
+                let make = o.make.as_deref().unwrap_or("-");
+                let model = o.model.as_deref().unwrap_or("-");
+                println!("{:<12} {:<20} {}", o.name, make, model);
             }
         }
 

@@ -8,6 +8,27 @@ pub struct Window {
     pub app_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct OutputInfo {
+    pub name: String,
+    pub make: Option<String>,
+    pub model: Option<String>,
+}
+
+pub fn get_all_outputs() -> Result<Vec<OutputInfo>, Box<dyn std::error::Error>> {
+    let output = Command::new("niri")
+        .args(["msg", "-j", "outputs"])
+        .output()?;
+    if !output.status.success() {
+        return Err("niri msg outputs failed".into());
+    }
+
+    let map: std::collections::HashMap<String, OutputInfo> = serde_json::from_slice(&output.stdout)?;
+    let mut list: Vec<OutputInfo> = map.into_values().collect();
+    list.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(list)
+}
+
 pub fn get_all_windows() -> Result<Vec<Window>, Box<dyn std::error::Error>> {
     let output = Command::new("niri")
         .args(["msg", "-j", "windows"])
