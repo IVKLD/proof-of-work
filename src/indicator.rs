@@ -1,4 +1,4 @@
-#![allow(clippy::chunks_exact_to_as_chunks, clippy::collapsible_if)]
+#![allow(unknown_lints, clippy::collapsible_if)]
 
 use std::os::fd::{AsFd, AsRawFd};
 use std::sync::Arc;

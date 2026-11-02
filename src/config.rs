@@ -6,6 +6,7 @@ pub struct Config {
     pub dir: PathBuf,
     pub interval_secs: u64,
     pub output: Option<String>,
+    pub workspace: Option<String>,
     pub upload_cmd: Option<String>,
     pub blocked_apps: Vec<String>,
 }
@@ -33,6 +34,7 @@ impl Default for Config {
             dir: PathBuf::from(home).join("worklog"),
             interval_secs: 60,
             output: None,
+            workspace: None,
             upload_cmd: None,
             blocked_apps: Vec::new(),
         }
@@ -65,6 +67,9 @@ impl Config {
                             "WORKTRACK_OUTPUT" if !val.is_empty() => {
                                 cfg.output = Some(val.to_string());
                             }
+                            "WORKTRACK_WORKSPACE" if !val.is_empty() => {
+                                cfg.workspace = Some(val.to_string());
+                            }
                             "WORKTRACK_UPLOAD_CMD" => cfg.upload_cmd = Some(val.to_string()),
                             "WORKTRACK_BLOCKED_APPS" => {
                                 cfg.blocked_apps = val
@@ -96,6 +101,12 @@ impl Config {
                 cfg.output = Some(trimmed.to_string());
             }
         }
+        if let Ok(val) = std::env::var("WORKTRACK_WORKSPACE") {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                cfg.workspace = Some(trimmed.to_string());
+            }
+        }
         if let Ok(val) = std::env::var("WORKTRACK_UPLOAD_CMD") {
             cfg.upload_cmd = Some(val);
         }
@@ -108,5 +119,18 @@ impl Config {
         }
 
         cfg
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_defaults() {
+        let cfg = Config::default();
+        assert_eq!(cfg.interval_secs, 60);
+        assert!(cfg.output.is_none());
+        assert!(cfg.workspace.is_none());
     }
 }

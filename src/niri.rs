@@ -129,6 +129,104 @@ pub fn get_all_workspaces() -> Result<Vec<Workspace>, Box<dyn std::error::Error>
     Ok(list)
 }
 
+pub fn find_workspace(
+    workspaces: &[Workspace],
+    query: &str,
+    preferred_output: Option<&str>,
+) -> Option<Workspace> {
+    let q = query.trim();
+    if q.is_empty() {
+        return None;
+    }
+
+    // 1. Try matching workspace name (case-insensitive)
+    if let Some(ws) = workspaces
+        .iter()
+        .find(|w| w.name.as_deref().map(|n| n.eq_ignore_ascii_case(q)).unwrap_or(false))
+    {
+        return Some(ws.clone());
+    }
+
+    // 2. Try matching explicit "id:<number>"
+    if let Some(id) = q
+        .strip_prefix("id:")
+        .and_then(|s| s.trim().parse::<u64>().ok())
+    {
+        return workspaces.iter().find(|w| w.id == id).cloned();
+    }
+
+    // 3. Try matching numeric index (idx)
+    if let Ok(idx) = q.parse::<u64>() {
+        // If preferred output specified, try matching idx on that output first
+        if let Some(pref_out) = preferred_output {
+            let found = workspaces
+                .iter()
+                .find(|w| w.idx == Some(idx) && w.output.as_deref() == Some(pref_out));
+            if let Some(ws) = found {
+                return Some(ws.clone());
+            }
+        }
+        // Then try matching idx on any focused or active workspace
+        if let Some(ws) = workspaces
+            .iter()
+            .find(|w| w.idx == Some(idx) && (w.is_focused || w.is_active))
+        {
+            return Some(ws.clone());
+        }
+        // Fallback to first matching idx
+        if let Some(ws) = workspaces.iter().find(|w| w.idx == Some(idx)) {
+            return Some(ws.clone());
+        }
+    }
+
+    None
+}
+
+pub fn focus_workspace(reference: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let status = Command::new("niri")
+        .args(["msg", "action", "focus-workspace", reference])
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("niri msg action focus-workspace {reference} failed").into())
+    }
+}
+
+pub fn focus_workspace_previous() -> Result<(), Box<dyn std::error::Error>> {
+    let status = Command::new("niri")
+        .args(["msg", "action", "focus-workspace-previous"])
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("niri msg action focus-workspace-previous failed".into())
+    }
+}
+
+pub fn focus_window(id: u64) -> Result<(), Box<dyn std::error::Error>> {
+    let id_str = id.to_string();
+    let status = Command::new("niri")
+        .args(["msg", "action", "focus-window", "--id", &id_str])
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("niri msg action focus-window --id {id} failed").into())
+    }
+}
+
+pub fn focus_monitor(output: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let status = Command::new("niri")
+        .args(["msg", "action", "focus-monitor", output])
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("niri msg action focus-monitor {output} failed").into())
+    }
+}
+
 pub fn grim_bin() -> String {
     if Command::new("grim").arg("-h").output().is_ok() {
         return "grim".to_string();
@@ -175,6 +273,30 @@ pub fn get_blocked_window_rects_on_output(
         return Vec::new();
     }
 
+    let workspaces = match get_all_workspaces() {
+        Ok(w) => w,
+        Err(_) => return Vec::new(),
+    };
+    let active_ws = match workspaces
+        .into_iter()
+        .find(|w| w.output.as_deref() == Some(target_output) && w.is_active)
+    {
+        Some(w) => w,
+        None => return Vec::new(),
+    };
+
+    get_blocked_window_rects_for_workspace(active_ws.id, target_output, blocked_apps)
+}
+
+pub fn get_blocked_window_rects_for_workspace(
+    target_ws_id: u64,
+    target_output: &str,
+    blocked_apps: &[String],
+) -> Vec<[u32; 4]> {
+    if blocked_apps.is_empty() {
+        return Vec::new();
+    }
+
     let outputs = match get_all_outputs() {
         Ok(o) => o,
         Err(_) => return Vec::new(),
@@ -194,10 +316,7 @@ pub fn get_blocked_window_rects_on_output(
         Ok(w) => w,
         Err(_) => return Vec::new(),
     };
-    let active_ws = match workspaces
-        .into_iter()
-        .find(|w| w.output.as_deref() == Some(target_output) && w.is_active)
-    {
+    let target_ws = match workspaces.into_iter().find(|w| w.id == target_ws_id) {
         Some(w) => w,
         None => return Vec::new(),
     };
@@ -209,7 +328,7 @@ pub fn get_blocked_window_rects_on_output(
 
     let ws_windows: Vec<Window> = all_windows
         .into_iter()
-        .filter(|w| w.workspace_id == Some(active_ws.id))
+        .filter(|w| w.workspace_id == Some(target_ws.id))
         .collect();
 
     let gap = 8.0f64;
@@ -281,7 +400,7 @@ pub fn get_blocked_window_rects_on_output(
 
     // Find active column
     let mut active_col = sorted_cols.first().copied().unwrap_or(1);
-    if let Some(act_id) = active_ws.active_window_id {
+    if let Some(act_id) = target_ws.active_window_id {
         for (&c, w_list) in &cols {
             if w_list.iter().any(|w| w.id == act_id) {
                 active_col = c;
@@ -363,5 +482,62 @@ pub fn capture_screenshot(
         Ok(out_name)
     } else {
         Err(format!("grim failed to capture output {out_name}").into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_workspace() {
+        let workspaces = vec![
+            Workspace {
+                id: 1,
+                idx: Some(1),
+                name: Some("demonstrations".to_string()),
+                output: Some("DP-2".to_string()),
+                is_active: false,
+                is_focused: false,
+                active_window_id: None,
+            },
+            Workspace {
+                id: 2,
+                idx: Some(2),
+                name: Some("main".to_string()),
+                output: Some("DP-1".to_string()),
+                is_active: true,
+                is_focused: true,
+                active_window_id: None,
+            },
+            Workspace {
+                id: 3,
+                idx: Some(3),
+                name: None,
+                output: Some("DP-1".to_string()),
+                is_active: false,
+                is_focused: false,
+                active_window_id: None,
+            },
+        ];
+
+        // Search by name (case-insensitive)
+        let found = find_workspace(&workspaces, "demonstrations", None);
+        assert_eq!(found.unwrap().id, 1);
+
+        let found = find_workspace(&workspaces, "MAIN", None);
+        assert_eq!(found.unwrap().id, 2);
+
+        // Search by idx
+        let found = find_workspace(&workspaces, "3", None);
+        assert_eq!(found.unwrap().id, 3);
+
+        // Search by id
+        let found = find_workspace(&workspaces, "id:1", None);
+        assert_eq!(found.unwrap().id, 1);
+
+        // Not found
+        let found = find_workspace(&workspaces, "nonexistent", None);
+        assert!(found.is_none());
     }
 }

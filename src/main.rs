@@ -46,6 +46,8 @@ enum Commands {
     Status,
     /// Показать открытые окна
     Windows,
+    /// Показать доступные рабочие пространства (workspaces) в niri
+    Workspaces,
     /// Показать доступные мониторы для WORKTRACK_OUTPUT
     Outputs,
     /// Собрать архив за сегодняшний день
@@ -111,6 +113,72 @@ fn capture_screen(day_dir: &Path, cfg: &Config, hidden: Option<&Arc<AtomicBool>>
 
     let is_daemon = get_running_pid().is_some() || hidden.is_some();
 
+    // 1. Resolve target workspace and output
+    let all_workspaces = niri::get_all_workspaces().unwrap_or_default();
+    let target_ws = cfg
+        .workspace
+        .as_deref()
+        .and_then(|q| niri::find_workspace(&all_workspaces, q, cfg.output.as_deref()));
+
+    let (
+        target_output,
+        target_ws_id,
+        needs_restore,
+        prev_win_id,
+        prev_active_ws,
+        prev_focused_output,
+    ) = if let Some(ref ws) = target_ws {
+        let out_name = ws
+            .output
+            .clone()
+            .or_else(|| cfg.output.clone())
+            .unwrap_or_else(|| "DP-1".to_string());
+
+        if ws.is_active {
+            // Workspace is already visible on its output: no switching needed!
+            (out_name, Some(ws.id), false, None, None, None)
+        } else {
+            // Workspace is inactive: switch to it temporarily
+            let prev_win = niri::get_focused_window().map(|w| w.id);
+            let prev_active = all_workspaces
+                .iter()
+                .find(|w| w.output.as_deref() == Some(&out_name) && w.is_active)
+                .cloned();
+            let prev_focused_out = niri::get_focused_output().map(|o| o.name);
+
+            // Switch to workspace
+            if let Some(ref name) = ws.name {
+                let _ = niri::focus_workspace(name);
+            } else if let Some(idx) = ws.idx {
+                let _ = niri::focus_monitor(&out_name);
+                let _ = niri::focus_workspace(&idx.to_string());
+            }
+
+            (
+                out_name,
+                Some(ws.id),
+                true,
+                prev_win,
+                prev_active,
+                prev_focused_out,
+            )
+        }
+    } else {
+        if let Some(ref q) = cfg.workspace {
+            append_log(
+                day_dir,
+                &format!("WARN: configured workspace '{q}' not found; falling back to output"),
+            );
+        }
+        let out_name = cfg
+            .output
+            .clone()
+            .or_else(|| niri::get_focused_output().map(|o| o.name))
+            .unwrap_or_else(|| "DP-1".to_string());
+        (out_name, None, false, None, None, None)
+    };
+
+    // 2. Perform capture with Layer::Bottom occluding barrier
     let res = if is_daemon {
         // Daemon is active: trigger Layer::Bottom cover and hide indicator via worktrack.hide
         if let Some(h) = hidden {
@@ -118,9 +186,9 @@ fn capture_screen(day_dir: &Path, cfg: &Config, hidden: Option<&Arc<AtomicBool>>
         }
         let hide_file = runtime_dir().join("worktrack.hide");
         let _ = fs::File::create(&hide_file);
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(70));
 
-        let r = niri::capture_screenshot(&file_str, cfg.output.as_deref());
+        let r = niri::capture_screenshot(&file_str, Some(&target_output));
 
         if let Some(h) = hidden {
             h.store(false, Ordering::SeqCst);
@@ -129,21 +197,43 @@ fn capture_screen(day_dir: &Path, cfg: &Config, hidden: Option<&Arc<AtomicBool>>
         r
     } else {
         // Standalone CLI invocation (daemon not running): mount Layer::Bottom barrier directly
-        let out_name = cfg
-            .output
-            .clone()
-            .or_else(|| niri::get_focused_output().map(|o| o.name))
-            .unwrap_or_else(|| "DP-1".to_string());
-        match indicator::capture_with_standalone_barrier(&file_str, &out_name) {
-            Ok(()) => Ok(out_name),
+        match indicator::capture_with_standalone_barrier(&file_str, &target_output) {
+            Ok(()) => Ok(target_output.clone()),
             Err(e) => Err(e),
         }
     };
 
+    // 3. Restore previous workspace/window if we switched
+    if needs_restore {
+        if let Some(win_id) = prev_win_id {
+            let _ = niri::focus_window(win_id);
+        } else if let Some(prev_ws) = prev_active_ws {
+            if let Some(ref name) = prev_ws.name {
+                let _ = niri::focus_workspace(name);
+            } else if let Some(idx) = prev_ws.idx {
+                if let Some(ref out) = prev_ws.output {
+                    let _ = niri::focus_monitor(out);
+                }
+                let _ = niri::focus_workspace(&idx.to_string());
+            } else {
+                let _ = niri::focus_workspace_previous();
+            }
+            if let Some(ref prev_out) = prev_focused_output {
+                let _ = niri::focus_monitor(prev_out);
+            }
+        } else {
+            let _ = niri::focus_workspace_previous();
+        }
+    }
+
+    // 4. Apply watermark & blackout blocked apps if any
     match res {
         Ok(out_name) => {
-            let blocked_rects =
-                niri::get_blocked_window_rects_on_output(&out_name, &cfg.blocked_apps);
+            let blocked_rects = if let Some(ws_id) = target_ws_id {
+                niri::get_blocked_window_rects_for_workspace(ws_id, &out_name, &cfg.blocked_apps)
+            } else {
+                niri::get_blocked_window_rects_on_output(&out_name, &cfg.blocked_apps)
+            };
             if stamper::stamp_screenshot(&file_path, &now_stamp, &blocked_rects).is_err() {
                 append_log(day_dir, &format!("WARN: could not stamp {file_name}"));
             }
@@ -244,6 +334,103 @@ fn print_status(cfg: &Config) {
     }
     let count = count_screenshots_today(&cfg.dir);
     println!("Скриншотов за сегодня: {count}");
+
+    if let Some(ref ws) = cfg.workspace {
+        println!("Настроенный воркспейс: WORKTRACK_WORKSPACE=\"{ws}\"");
+    } else if let Some(ref out) = cfg.output {
+        println!("Настроенный монитор: WORKTRACK_OUTPUT=\"{out}\"");
+    } else {
+        println!("Снимается активный монитор с фокусом");
+    }
+}
+
+fn print_workspaces(cfg: &Config) {
+    let workspaces = match niri::get_all_workspaces() {
+        Ok(w) => w,
+        Err(e) => {
+            println!("Ошибка получения рабочих пространств niri: {e}");
+            return;
+        }
+    };
+    let windows = niri::get_all_windows().unwrap_or_default();
+
+    println!("Рабочие пространства niri (workspaces):");
+    println!("{}", "-".repeat(70));
+    for ws in &workspaces {
+        let is_active_str = if ws.is_active { " [активен]" } else { "" };
+        let is_focused_str = if ws.is_focused { " [фокус]" } else { "" };
+        let name_str = ws.name.as_deref().unwrap_or("<без имени>");
+        let out_str = ws.output.as_deref().unwrap_or("?");
+        let idx_str = ws
+            .idx
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| "?".to_string());
+
+        let ws_wins: Vec<&niri::Window> = windows
+            .iter()
+            .filter(|w| w.workspace_id == Some(ws.id))
+            .collect();
+        let win_count = ws_wins.len();
+
+        let is_cfg_match = cfg
+            .workspace
+            .as_deref()
+            .is_some_and(|q| {
+                let name_match = ws
+                    .name
+                    .as_deref()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(q));
+                let idx_match = ws.idx.is_some_and(|i| q == i.to_string());
+                let id_match = q == format!("id:{}", ws.id);
+                name_match || idx_match || id_match
+            });
+
+        let match_tag = if is_cfg_match {
+            " <== WORKTRACK_WORKSPACE"
+        } else {
+            ""
+        };
+
+        println!(
+            "  * id: {:<2} idx: {:<2} output: {:<5} name: {:<15} окон: {:<2}{}{}{}",
+            ws.id, idx_str, out_str, name_str, win_count, is_active_str, is_focused_str, match_tag
+        );
+
+        for w in ws_wins {
+            let app = w.app_id.as_deref().unwrap_or("?");
+            let title = w.title.as_deref().unwrap_or("");
+            let blocked = if niri::is_window_blocked(w, &cfg.blocked_apps) {
+                " [ЗАПРЕЩЕНО]"
+            } else {
+                ""
+            };
+            println!("      - [id: {}] {app}: {title}{blocked}", w.id);
+        }
+    }
+
+    println!();
+    if let Some(ref target) = cfg.workspace {
+        let matched = niri::find_workspace(&workspaces, target, cfg.output.as_deref());
+        match matched {
+            Some(w) => {
+                let name = w.name.as_deref().unwrap_or("<без имени>");
+                let out = w.output.as_deref().unwrap_or("?");
+                println!(
+                    "Настроен воркспейс: WORKTRACK_WORKSPACE=\"{target}\" (найден: \"{name}\" на {out})"
+                );
+            }
+            None => {
+                println!(
+                    "Настроен воркспейс: WORKTRACK_WORKSPACE=\"{target}\" (ВНИМАНИЕ: не найден в niri!)"
+                );
+            }
+        }
+    } else {
+        println!(
+            "Воркспейс не настроен (WORKTRACK_WORKSPACE не задан). Снимается монитор: {}",
+            cfg.output.as_deref().unwrap_or("активный с фокусом")
+        );
+    }
 }
 
 fn count_screenshots_today(dir: &Path) -> usize {
@@ -272,7 +459,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => {
             print_status(&cfg);
             println!(
-                "\nДоступные команды: worktrack <start|shot|pause|resume|status|windows|stop|pack|upload|completions>"
+                "\nДоступные команды: worktrack <start|shot|pause|resume|status|workspaces|windows|stop|pack|upload|completions>"
             );
             println!("Подробная справка по аргументам: worktrack --help");
         }
@@ -355,6 +542,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let title = w.title.as_deref().unwrap_or("");
                 println!("{:<10} {:<28} {}", w.id, app, title);
             }
+        }
+
+        Some(Commands::Workspaces) => {
+            print_workspaces(&cfg);
         }
 
         Some(Commands::Outputs) => {
