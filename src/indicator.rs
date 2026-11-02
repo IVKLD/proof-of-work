@@ -43,6 +43,7 @@ pub struct MonitorSurface {
     pub bg_configured: bool,
     pub bg_width: u32,
     pub bg_height: u32,
+    pub pool: SlotPool,
 }
 
 pub struct IndicatorState {
@@ -51,7 +52,6 @@ pub struct IndicatorState {
     pub compositor_state: CompositorState,
     pub layer_shell: LayerShell,
     pub shm: Shm,
-    pub pool: SlotPool,
     pub surfaces: Vec<MonitorSurface>,
     pub qh: QueueHandle<IndicatorState>,
     pub paused: Arc<AtomicBool>,
@@ -152,10 +152,7 @@ impl OutputHandler for IndicatorState {
                 }
                 if (s.ui_scale - new_ui_scale).abs() > 0.01 {
                     s.ui_scale = new_ui_scale;
-                    let logical_w = (LOGICAL_WIDTH as f32 * new_ui_scale).round() as u32;
-                    let logical_h = (LOGICAL_HEIGHT as f32 * new_ui_scale).round() as u32;
                     let logical_margin = (12.0 * new_ui_scale).round() as i32;
-                    s.indicator_layer.set_size(logical_w, logical_h);
                     s.indicator_layer.set_margin(logical_margin, logical_margin, 0, 0);
                     s.indicator_layer.commit();
                 }
@@ -316,6 +313,9 @@ impl IndicatorState {
             .and_then(|o| self.output_state.info(o))
             .and_then(|i| i.name);
 
+        let pool = SlotPool::new(16 * 1024 * 1024, &self.shm)
+            .expect("Failed to create shm slot pool for monitor");
+
         self.surfaces.push(MonitorSurface {
             output: output.cloned(),
             output_name,
@@ -327,6 +327,7 @@ impl IndicatorState {
             bg_configured: false,
             bg_width: 0,
             bg_height: 0,
+            pool,
         });
     }
 
@@ -355,8 +356,7 @@ impl IndicatorState {
                 let phys_w = (LOGICAL_WIDTH as f32 * total_scale).round() as i32;
                 let phys_h = (LOGICAL_HEIGHT as f32 * total_scale).round() as i32;
                 let stride = phys_w * 4;
-
-                if let Ok((buffer, canvas)) = self.pool.create_buffer(
+                if let Ok((buffer, canvas)) = s.pool.create_buffer(
                     phys_w,
                     phys_h,
                     stride,
@@ -390,13 +390,13 @@ impl IndicatorState {
                     let h = s.bg_height;
                     let stride = (w * 4) as i32;
 
-                    if let Ok((buffer, canvas)) = self.pool.create_buffer(
+                    if let Ok((buffer, canvas)) = s.pool.create_buffer(
                         w as i32,
                         h as i32,
                         stride,
                         wl_shm::Format::Argb8888,
                     ) {
-                        for p in canvas.chunks_exact_mut(4) {
+                        for p in canvas.as_chunks_mut::<4>().0 {
                             p[0] = 15;  // B (#0f)
                             p[1] = 15;  // G (#0f)
                             p[2] = 15;  // R (#0f)
@@ -409,7 +409,7 @@ impl IndicatorState {
                     }
                 } else {
                     // NORMAL RUNNING MODE: 1x1 transparent buffer (alpha = 0)
-                    if let Ok((buffer, canvas)) = self.pool.create_buffer(1, 1, 4, wl_shm::Format::Argb8888) {
+                    if let Ok((buffer, canvas)) = s.pool.create_buffer(1, 1, 4, wl_shm::Format::Argb8888) {
                         canvas.fill(0);
                         let surface = s.bg_cover_layer.wl_surface();
                         surface.attach(Some(buffer.wl_buffer()), 0, 0);
@@ -523,7 +523,7 @@ pub fn render_indicator_pill(
     }
 
     // 4. Pre-multiplied ARGB8888 for Wayland SHM canvas
-    for (src, dst) in img.pixels().zip(canvas.chunks_exact_mut(4)) {
+    for (src, dst) in img.pixels().zip(canvas.as_chunks_mut::<4>().0) {
         let [r, g, b, a] = src.0;
         let alpha = a as f32 / 255.0;
         dst[0] = ((b as f32) * alpha).round() as u8;
@@ -565,19 +565,12 @@ pub fn run_indicator(
         Err(_) => return,
     };
 
-    // Buffer pool for multi-monitor 4K HiDPI and Layer::Bottom background cover
-    let pool = match SlotPool::new(64 * 1024 * 1024, &shm) {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-
     let mut state = IndicatorState {
         registry_state: RegistryState::new(&globals),
         output_state: OutputState::new(&globals, &qh),
         compositor_state,
         layer_shell,
         shm,
-        pool,
         surfaces: Vec::new(),
         qh: qh.clone(),
         paused,
@@ -773,7 +766,7 @@ pub fn capture_with_standalone_barrier(
     let (w, h) = (state.width, state.height);
     if w > 0 && h > 0 {
         let (buffer, canvas) = state.pool.create_buffer(w as i32, h as i32, (w * 4) as i32, wl_shm::Format::Argb8888)?;
-        for p in canvas.chunks_exact_mut(4) {
+        for p in canvas.as_chunks_mut::<4>().0 {
             p[0] = 15;  // B (#0f)
             p[1] = 15;  // G (#0f)
             p[2] = 15;  // R (#0f)
