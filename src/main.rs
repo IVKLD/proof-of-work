@@ -15,14 +15,13 @@ use std::time::Duration;
 use chrono::Local;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
-use regex::Regex;
 
 use config::Config;
 
 #[derive(Parser)]
 #[command(
     name = "worktrack",
-    about = "Time & window screenshot tracker for Wayland (niri)"
+    about = "Screen screenshot & time tracker for Wayland (niri)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -33,6 +32,8 @@ struct Cli {
 enum Commands {
     /// Запустить трекер в фоне
     Start,
+    /// Сделать тестовый снимок экрана прямо сейчас
+    Shot,
     /// Внутренний процесс демона
     Daemon,
     /// Поставить трекер на паузу (индикатор станет жёлтым)
@@ -43,7 +44,7 @@ enum Commands {
     Stop,
     /// Показать текущий статус трекера и количество снимков
     Status,
-    /// Показать открытые окна и статус захвата
+    /// Показать открытые окна
     Windows,
     /// Собрать архив за сегодняшний день
     Pack,
@@ -98,51 +99,41 @@ fn append_log(day_dir: &Path, msg: &str) {
     }
 }
 
-fn capture_windows(day_dir: &Path, app_regex: &Regex) {
+fn capture_screen(day_dir: &Path, output: Option<&str>) {
     let now_stamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let time_str = Local::now().format("%H-%M-%S").to_string();
 
-    match niri::get_matching_windows(app_regex, true) {
-        Ok(wins) => {
-            for w in wins {
-                let app = w.app_id.unwrap_or_else(|| "window".to_string());
-                let clean_app: String = app
-                    .chars()
-                    .map(|c| {
-                        if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
-                            c
-                        } else {
-                            '_'
-                        }
-                    })
-                    .collect();
+    let file_name = format!("{time_str}_screen.png");
+    let file_path = day_dir.join(&file_name);
+    let file_str = file_path.to_string_lossy().to_string();
 
-                // Distinct file name using window ID prevents collisions between multiple instances
-                let file_name = format!("{time_str}_{clean_app}_{}.png", w.id);
-                let file_path = day_dir.join(&file_name);
-                let file_str = file_path.to_string_lossy().to_string();
+    let res = if let Some(out) = output {
+        Command::new("grim")
+            .args(["-o", out, &file_str])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    } else {
+        niri::screenshot_screen(&file_str).is_ok()
+    };
 
-                if let Ok(()) = niri::screenshot_window(w.id, &file_str) {
-                    // Wait up to 500ms for niri compositor to finish writing PNG to disk
-                    let mut stamped = false;
-                    for _ in 0..10 {
-                        std::thread::sleep(Duration::from_millis(50));
-                        if fs::metadata(&file_path).is_ok_and(|m| m.len() > 100)
-                            && stamper::stamp_screenshot(&file_path, &now_stamp).is_ok()
-                        {
-                            stamped = true;
-                            break;
-                        }
-                    }
-                    if !stamped {
-                        append_log(day_dir, &format!("WARN: could not stamp {file_name}"));
-                    }
-                }
+    if res {
+        // Wait up to 500ms for compositor to finish writing PNG to disk
+        let mut stamped = false;
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_millis(50));
+            if fs::metadata(&file_path).is_ok_and(|m| m.len() > 100)
+                && stamper::stamp_screenshot(&file_path, &now_stamp).is_ok()
+            {
+                stamped = true;
+                break;
             }
         }
-        Err(err) => {
-            append_log(day_dir, &format!("ERROR: niri query failed: {err}"));
+        if !stamped {
+            append_log(day_dir, &format!("WARN: could not stamp {file_name}"));
         }
+    } else {
+        append_log(day_dir, "ERROR: failed to take screen screenshot");
     }
 }
 
@@ -165,8 +156,6 @@ fn run_daemon(cfg: Config) {
     let ind_thread = std::thread::spawn(move || {
         indicator::run_indicator(ind_paused, ind_running);
     });
-
-    let app_regex = Regex::new(&cfg.apps_regex).unwrap_or_else(|_| Regex::new("^$").unwrap());
 
     let initial_day = Local::now().format("%Y-%m-%d").to_string();
     let initial_dir = cfg.dir.join(&initial_day);
@@ -202,7 +191,7 @@ fn run_daemon(cfg: Config) {
 
         if !is_paused && last_capture.elapsed() >= Duration::from_secs(cfg.interval_secs) {
             last_capture = std::time::Instant::now();
-            capture_windows(&day_dir, &app_regex);
+            capture_screen(&day_dir, cfg.output.as_deref());
         }
 
         std::thread::sleep(Duration::from_millis(250));
@@ -262,7 +251,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => {
             print_status(&cfg);
             println!(
-                "\nДоступные команды: worktrack <start|pause|resume|status|windows|stop|pack|upload|completions>"
+                "\nДоступные команды: worktrack <start|shot|pause|resume|status|windows|stop|pack|upload|completions>"
             );
             println!("Подробная справка по аргументам: worktrack --help");
         }
@@ -293,6 +282,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let child = cmd.spawn()?;
             println!("Трекер запущен (PID {})", child.id());
+        }
+
+        Some(Commands::Shot) => {
+            let today = Local::now().format("%Y-%m-%d").to_string();
+            let day_dir = cfg.dir.join(&today);
+            let _ = fs::create_dir_all(&day_dir);
+            capture_screen(&day_dir, cfg.output.as_deref());
+            let count = count_screenshots_today(&cfg.dir);
+            println!("Снимок экрана сохранён в {day_dir:?} (всего за день: {count})");
         }
 
         Some(Commands::Daemon) => {
@@ -328,29 +326,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Some(Commands::Windows) => {
-            let app_regex = Regex::new(&cfg.apps_regex)?;
-            let active_workspaces = niri::get_active_workspaces().unwrap_or_default();
             let windows = niri::get_all_windows()?;
-
-            println!("{:<14} {:<24} TITLE", "СТАТУС", "APP_ID");
+            println!("{:<10} {:<28} TITLE", "ID", "APP_ID");
             println!("{}", "-".repeat(70));
             for w in windows {
                 let app = w.app_id.as_deref().unwrap_or("<unknown>");
                 let title = w.title.as_deref().unwrap_or("");
-                let wid = w.workspace_id.unwrap_or(0);
-
-                let is_app_matched = app_regex.is_match(app);
-                let is_on_active = active_workspaces.contains(&wid);
-
-                let status = if is_app_matched && is_on_active {
-                    "СНИМАЕТСЯ"
-                } else if is_app_matched {
-                    "ДРУГОЙ СТОЛ"
-                } else {
-                    "-"
-                };
-
-                println!("{:<14} {:<24} {}", status, app, title);
+                println!("{:<10} {:<28} {}", w.id, app, title);
             }
         }
 

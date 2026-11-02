@@ -5,8 +5,24 @@ use std::path::PathBuf;
 pub struct Config {
     pub dir: PathBuf,
     pub interval_secs: u64,
-    pub apps_regex: String,
+    pub output: Option<String>,
     pub upload_cmd: Option<String>,
+}
+
+fn expand_path(raw: &str) -> PathBuf {
+    let trimmed = raw.trim();
+    if let Ok(home) = std::env::var("HOME") {
+        if trimmed == "~" || trimmed == "$HOME" {
+            return PathBuf::from(home);
+        }
+        if let Some(rest) = trimmed.strip_prefix("~/") {
+            return PathBuf::from(home).join(rest);
+        }
+        if let Some(rest) = trimmed.strip_prefix("$HOME/") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(trimmed)
 }
 
 impl Default for Config {
@@ -15,8 +31,7 @@ impl Default for Config {
         Self {
             dir: PathBuf::from(home).join("worklog"),
             interval_secs: 60,
-            apps_regex: "^(kitty|firefox|code|Code|discord|vesktop|org\\.telegram\\.desktop)$"
-                .to_string(),
+            output: None,
             upload_cmd: None,
         }
     }
@@ -39,13 +54,15 @@ impl Config {
                         let key = k.trim().trim_start_matches("export ").trim();
                         let val = v.trim().trim_matches('"').trim_matches('\'').trim();
                         match key {
-                            "WORKTRACK_DIR" => cfg.dir = PathBuf::from(val),
+                            "WORKTRACK_DIR" => cfg.dir = expand_path(val),
                             "WORKTRACK_INTERVAL" => {
                                 if let Ok(n) = val.parse() {
                                     cfg.interval_secs = n;
                                 }
                             }
-                            "WORKTRACK_APPS" => cfg.apps_regex = val.to_string(),
+                            "WORKTRACK_OUTPUT" if !val.is_empty() => {
+                                cfg.output = Some(val.to_string());
+                            }
                             "WORKTRACK_UPLOAD_CMD" => cfg.upload_cmd = Some(val.to_string()),
                             _ => {}
                         }
@@ -56,7 +73,7 @@ impl Config {
 
         // 2. Override with ambient env vars if set
         if let Ok(val) = std::env::var("WORKTRACK_DIR") {
-            cfg.dir = PathBuf::from(val);
+            cfg.dir = expand_path(&val);
         }
         if let Some(n) = std::env::var("WORKTRACK_INTERVAL")
             .ok()
@@ -64,8 +81,11 @@ impl Config {
         {
             cfg.interval_secs = n;
         }
-        if let Ok(val) = std::env::var("WORKTRACK_APPS") {
-            cfg.apps_regex = val;
+        if let Ok(val) = std::env::var("WORKTRACK_OUTPUT") {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                cfg.output = Some(trimmed.to_string());
+            }
         }
         if let Ok(val) = std::env::var("WORKTRACK_UPLOAD_CMD") {
             cfg.upload_cmd = Some(val);
