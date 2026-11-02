@@ -1,5 +1,6 @@
 mod archive;
 mod config;
+mod indicator;
 mod niri;
 mod stamper;
 
@@ -35,9 +36,9 @@ enum Commands {
     Shot,
     /// Внутренний процесс демона
     Daemon,
-    /// Поставить трекер на паузу
+    /// Поставить трекер на паузу (индикатор станет жёлтым)
     Pause,
-    /// Снять с паузы (снимок сразу)
+    /// Снять с паузы (индикатор станет красным, снимок сразу)
     Resume,
     /// Остановить трекер, собрать архив за сегодня и выгрузить
     Stop,
@@ -100,7 +101,12 @@ fn append_log(day_dir: &Path, msg: &str) {
     }
 }
 
-fn capture_screen(day_dir: &Path, output: Option<&str>) {
+fn capture_screen(day_dir: &Path, output: Option<&str>, hidden: &Arc<AtomicBool>) {
+    // 1. Temporarily hide indicator so it is NEVER present on the screenshot
+    hidden.store(true, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(40));
+
+    // 2. Take screenshot via grim (pure screencopy, zero clipboard)
     let now_stamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let time_str = Local::now().format("%H-%M-%S").to_string();
 
@@ -109,6 +115,9 @@ fn capture_screen(day_dir: &Path, output: Option<&str>) {
     let file_str = file_path.to_string_lossy().to_string();
 
     let res = niri::capture_screenshot(&file_str, output).is_ok();
+
+    // 3. Immediately restore the indicator on screen
+    hidden.store(false, Ordering::SeqCst);
 
     if res {
         if stamper::stamp_screenshot(&file_path, &now_stamp).is_err() {
@@ -125,11 +134,20 @@ fn run_daemon(cfg: Config) {
 
     let running = Arc::new(AtomicBool::new(true));
     let paused = Arc::new(AtomicBool::new(pause_file_path().exists()));
+    let hidden = Arc::new(AtomicBool::new(false));
 
     // Hook signals
     let r_sig = running.clone();
     let _ = ctrlc::set_handler(move || {
         r_sig.store(false, Ordering::SeqCst);
+    });
+
+    // Start Wayland indicator thread
+    let ind_running = running.clone();
+    let ind_paused = paused.clone();
+    let ind_hidden = hidden.clone();
+    let ind_thread = std::thread::spawn(move || {
+        indicator::run_indicator(ind_paused, ind_hidden, ind_running);
     });
 
     let initial_day = Local::now().format("%Y-%m-%d").to_string();
@@ -166,7 +184,7 @@ fn run_daemon(cfg: Config) {
 
         if !is_paused && last_capture.elapsed() >= Duration::from_secs(cfg.interval_secs) {
             last_capture = std::time::Instant::now();
-            capture_screen(&day_dir, cfg.output.as_deref());
+            capture_screen(&day_dir, cfg.output.as_deref(), &hidden);
         }
 
         std::thread::sleep(Duration::from_millis(250));
@@ -178,6 +196,7 @@ fn run_daemon(cfg: Config) {
 
     let _ = fs::remove_file(pid_file_path());
     let _ = fs::remove_file(pause_file_path());
+    let _ = ind_thread.join();
 }
 
 fn print_status(cfg: &Config) {
@@ -262,7 +281,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let today = Local::now().format("%Y-%m-%d").to_string();
             let day_dir = cfg.dir.join(&today);
             let _ = fs::create_dir_all(&day_dir);
-            capture_screen(&day_dir, cfg.output.as_deref());
+            let hidden = Arc::new(AtomicBool::new(false));
+            capture_screen(&day_dir, cfg.output.as_deref(), &hidden);
             let count = count_screenshots_today(&cfg.dir);
             println!("Снимок сохранён в {day_dir:?} (всего за день: {count})");
         }
@@ -277,7 +297,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             let _ = fs::File::create(pause_file_path());
-            println!("Трекер поставлен на паузу");
+            println!("Трекер поставлен на паузу (индикатор жёлтый)");
         }
 
         Some(Commands::Resume) => {
@@ -286,7 +306,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             let _ = fs::remove_file(pause_file_path());
-            println!("Трекер снят с паузы");
+            println!("Трекер снят с паузы (индикатор красный)");
         }
 
         Some(Commands::Status) => {
