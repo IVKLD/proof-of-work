@@ -126,9 +126,9 @@ impl OutputHandler for IndicatorState {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        output: wl_output::WlOutput,
+        _output: wl_output::WlOutput,
     ) {
-        self.create_surface_for_output(Some(&output));
+        // Wait until update_output receives full output metadata (resolution, modes, name)
     }
 
     fn update_output(
@@ -137,6 +137,12 @@ impl OutputHandler for IndicatorState {
         _qh: &QueueHandle<Self>,
         output: wl_output::WlOutput,
     ) {
+        if !self.surfaces.iter().any(|s| s.output.as_ref() == Some(&output)) {
+            // First time this output is fully known! Create surface with accurate resolution and scale!
+            self.create_surface_for_output(Some(&output));
+            return;
+        }
+
         let new_ui_scale = self.compute_ui_scale(Some(&output));
         let out_name = self.output_state.info(&output).and_then(|i| i.name);
         for s in &mut self.surfaces {
@@ -582,12 +588,23 @@ pub fn run_indicator(
         target_output,
     };
 
+    // 1. Initial roundtrip to bind globals
+    let _ = event_queue.roundtrip(&mut state);
+    // 2. Second roundtrip to receive all wl_output metadata and fire update_output
     let _ = event_queue.roundtrip(&mut state);
 
     if state.surfaces.is_empty() {
-        state.create_surface_for_output(None);
+        let outputs: Vec<wl_output::WlOutput> = state.output_state.outputs().collect();
+        if outputs.is_empty() {
+            state.create_surface_for_output(None);
+        } else {
+            for output in outputs {
+                state.create_surface_for_output(Some(&output));
+            }
+        }
     }
 
+    // 3. Third roundtrip to acknowledge layer surface configuration
     let _ = event_queue.roundtrip(&mut state);
 
     let hide_file = std::env::var("XDG_RUNTIME_DIR")
