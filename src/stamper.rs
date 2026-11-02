@@ -1,8 +1,7 @@
 use ab_glyph::{FontRef, PxScale};
 use image::codecs::png::PngEncoder;
 use image::{ImageEncoder, Rgba, RgbaImage};
-use imageproc::drawing::{draw_filled_rect_mut, draw_text_mut, text_size};
-use imageproc::rect::Rect;
+use imageproc::drawing::{draw_text_mut, text_size};
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
@@ -18,26 +17,31 @@ pub fn stamp_screenshot(path: &Path, text: &str) -> Result<(), Box<dyn std::erro
 
     let (text_w, text_h) = text_size(scale, &font, text);
 
-    let padding_x = 8i32;
-    let padding_y = 4i32;
+    let margin_x = 12i32;
+    let margin_y = 12i32;
 
-    let margin_x = 10i32;
-    let margin_y = 10i32;
+    let text_pos_x = margin_x;
+    let text_pos_y = (height as i32) - margin_y - (text_h as i32);
 
-    let box_w = text_w as i32 + padding_x * 2;
-    let box_h = text_h as i32 + padding_y * 2;
-
-    let box_x = margin_x;
-    let box_y = (height as i32) - margin_y - box_h;
-
-    if box_y >= 0 && box_x >= 0 && (box_x + box_w) <= (width as i32) {
-        // Semi-transparent dark background: RGBA (15, 15, 15, 200)
-        let rect = Rect::at(box_x, box_y).of_size(box_w as u32, box_h as u32);
-        draw_filled_rect_mut(&mut img, rect, Rgba([15, 15, 15, 200]));
+    if text_pos_y >= 0 && text_pos_x >= 0 && (text_pos_x + text_w as i32) <= (width as i32) {
+        // Outline/shadow for readability without any background box
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                if dx != 0 || dy != 0 {
+                    draw_text_mut(
+                        &mut img,
+                        Rgba([0, 0, 0, 230]),
+                        text_pos_x + dx,
+                        text_pos_y + dy,
+                        scale,
+                        &font,
+                        text,
+                    );
+                }
+            }
+        }
 
         // White text: RGBA (255, 255, 255, 255)
-        let text_pos_x = box_x + padding_x;
-        let text_pos_y = box_y + padding_y;
         draw_text_mut(
             &mut img,
             Rgba([255, 255, 255, 255]),

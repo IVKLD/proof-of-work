@@ -16,6 +16,4 @@ libc = "0.2"
 regex = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-smithay-client-toolkit = { version = "0.19", default-features = false }
 tar = "0.4"
-wayland-client = "0.31"

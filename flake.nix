@@ -1,5 +1,5 @@
 {
-  description = "Pure Wayland (niri) work time & window screenshot tracker with SCTK indicator";
+  description = "Pure Wayland (niri) work time & window screenshot tracker";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

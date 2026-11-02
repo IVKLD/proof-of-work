@@ -1,6 +1,5 @@
 mod archive;
 mod config;
-mod indicator;
 mod niri;
 mod stamper;
 
@@ -36,9 +35,9 @@ enum Commands {
     Shot,
     /// Внутренний процесс демона
     Daemon,
-    /// Поставить трекер на паузу (индикатор станет жёлтым)
+    /// Поставить трекер на паузу
     Pause,
-    /// Снять с паузы (индикатор станет красным, снимок сразу)
+    /// Снять с паузы (снимок сразу)
     Resume,
     /// Остановить трекер, собрать архив за сегодня и выгрузить
     Stop,
@@ -133,13 +132,6 @@ fn run_daemon(cfg: Config) {
         r_sig.store(false, Ordering::SeqCst);
     });
 
-    // Start Wayland indicator thread
-    let ind_running = running.clone();
-    let ind_paused = paused.clone();
-    let ind_thread = std::thread::spawn(move || {
-        indicator::run_indicator(ind_paused, ind_running);
-    });
-
     let initial_day = Local::now().format("%Y-%m-%d").to_string();
     let initial_dir = cfg.dir.join(&initial_day);
     let _ = fs::create_dir_all(&initial_dir);
@@ -186,7 +178,6 @@ fn run_daemon(cfg: Config) {
 
     let _ = fs::remove_file(pid_file_path());
     let _ = fs::remove_file(pause_file_path());
-    let _ = ind_thread.join();
 }
 
 fn print_status(cfg: &Config) {
@@ -286,7 +277,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             let _ = fs::File::create(pause_file_path());
-            println!("Трекер поставлен на паузу (индикатор жёлтый)");
+            println!("Трекер поставлен на паузу");
         }
 
         Some(Commands::Resume) => {
@@ -295,7 +286,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             let _ = fs::remove_file(pause_file_path());
-            println!("Трекер снят с паузы (индикатор красный)");
+            println!("Трекер снят с паузы");
         }
 
         Some(Commands::Status) => {

@@ -39,7 +39,7 @@ rustPlatform.buildRustPackage {
   '';
 
   meta = with lib; {
-    description = "Pure Wayland (niri) work time & window screenshot tracker with SCTK indicator";
+    description = "Pure Wayland (niri) work time & window screenshot tracker";
     mainProgram = "worktrack";
     platforms = platforms.linux;
   };
