@@ -357,7 +357,7 @@ fn run_daemon(cfg: Config) {
 
         if last_second_tick.elapsed() >= Duration::from_secs(1) {
             let elapsed_ticks = last_second_tick.elapsed().as_secs();
-            last_second_tick = std::time::Instant::now();
+            last_second_tick += Duration::from_secs(elapsed_ticks);
             if !is_paused {
                 session_worked_secs += elapsed_ticks;
             }
@@ -422,10 +422,13 @@ fn run_daemon(cfg: Config) {
 fn format_duration_hm(secs: u64) -> String {
     let h = secs / 3600;
     let m = (secs % 3600) / 60;
+    let s = secs % 60;
     if h > 0 {
         format!("{h} ч {m:02} мин")
-    } else {
+    } else if m > 0 {
         format!("{m} мин")
+    } else {
+        format!("{s} сек")
     }
 }
 
@@ -736,6 +739,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         break;
                     }
                     std::thread::sleep(Duration::from_millis(100));
+                }
+                if is_process_running(pid) {
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
                 }
             } else {
                 println!("Процесс трекера не запущен");

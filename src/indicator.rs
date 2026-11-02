@@ -149,7 +149,10 @@ impl OutputHandler for IndicatorState {
                 }
                 if (s.ui_scale - new_ui_scale).abs() > 0.01 {
                     s.ui_scale = new_ui_scale;
+                    let logical_w = (LOGICAL_WIDTH as f32 * new_ui_scale).round() as u32;
+                    let logical_h = (LOGICAL_HEIGHT as f32 * new_ui_scale).round() as u32;
                     let logical_margin = (12.0 * new_ui_scale).round() as i32;
+                    s.indicator_layer.set_size(logical_w, logical_h);
                     s.indicator_layer.set_margin(logical_margin, logical_margin, 0, 0);
                     s.indicator_layer.commit();
                 }
