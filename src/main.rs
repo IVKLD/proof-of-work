@@ -15,6 +15,7 @@ use std::time::Duration;
 use chrono::Local;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
+use serde::{Deserialize, Serialize};
 
 use config::Config;
 
@@ -250,6 +251,63 @@ fn capture_screen(
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ShiftState {
+    pub date: String,
+    pub first_start: String,
+    pub current_session_start: Option<String>,
+    pub total_worked_secs: u64,
+}
+
+fn shift_state_path(day_dir: &Path) -> PathBuf {
+    day_dir.join("shift.json")
+}
+
+fn get_first_screenshot_time(dir: &Path, today: &str) -> Option<String> {
+    let day_dir = dir.join(today);
+    let mut shots: Vec<String> = fs::read_dir(day_dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "png"))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    shots.sort();
+    let first = shots.first()?;
+    let stem = first.strip_suffix(".png")?;
+    let parts: Vec<&str> = stem.split('-').collect();
+    if parts.len() == 3 {
+        Some(format!("{}:{}:{}", parts[0], parts[1], parts[2]))
+    } else {
+        None
+    }
+}
+
+fn load_shift_state(day_dir: &Path, today: &str, cfg: &Config) -> (Option<String>, u64) {
+    let p = shift_state_path(day_dir);
+    if let Ok(content) = fs::read_to_string(&p)
+        && let Ok(state) = serde_json::from_str::<ShiftState>(&content)
+        && state.date == today
+    {
+        let first_start = cfg.start_time.clone().or(Some(state.first_start));
+        return (first_start, state.total_worked_secs);
+    }
+
+    let first_start = cfg
+        .start_time
+        .clone()
+        .or_else(|| get_first_screenshot_time(&cfg.dir, today));
+    let shots = count_screenshots_today(&cfg.dir);
+    let prior_secs = (shots as u64) * cfg.interval_secs;
+    (first_start, prior_secs)
+}
+
+fn save_shift_state(day_dir: &Path, state: &ShiftState) {
+    let p = shift_state_path(day_dir);
+    if let Ok(json) = serde_json::to_string_pretty(state) {
+        let _ = fs::write(p, json);
+    }
+}
+
 fn run_daemon(cfg: Config) {
     let pid = std::process::id() as i32;
     let _ = fs::write(pid_file_path(), pid.to_string());
@@ -276,16 +334,30 @@ fn run_daemon(cfg: Config) {
 
     let target_output = Arc::new(std::sync::RwLock::new(initial_target));
 
-    let daily_goal_secs = (cfg.daily_hours * 3600.0).round() as u64;
-    let initial_shots = count_screenshots_today(&cfg.dir);
-    let mut prior_worked_secs = (initial_shots as u64) * cfg.interval_secs;
+    let initial_day = Local::now().format("%Y-%m-%d").to_string();
+    let initial_dir = cfg.dir.join(&initial_day);
+    let _ = fs::create_dir_all(&initial_dir);
+
+    let (first_start_opt, mut prior_worked_secs) =
+        load_shift_state(&initial_dir, &initial_day, &cfg);
+    let session_start_time = Local::now().format("%H:%M:%S").to_string();
+    let mut first_start_time = first_start_opt.unwrap_or_else(|| session_start_time.clone());
     let mut session_worked_secs: u64 = 0;
 
+    let daily_goal_secs = (cfg.daily_hours * 3600.0).round() as u64;
     let initial_rem_work = if prior_worked_secs >= daily_goal_secs {
         -((prior_worked_secs - daily_goal_secs) as i64)
     } else {
         (daily_goal_secs - prior_worked_secs) as i64
     };
+
+    let mut current_shift = ShiftState {
+        date: initial_day.clone(),
+        first_start: first_start_time.clone(),
+        current_session_start: Some(session_start_time.clone()),
+        total_worked_secs: prior_worked_secs,
+    };
+    save_shift_state(&initial_dir, &current_shift);
 
     // Start Wayland indicator thread
     let ind_running = running.clone();
@@ -309,9 +381,6 @@ fn run_daemon(cfg: Config) {
         );
     });
 
-    let initial_day = Local::now().format("%Y-%m-%d").to_string();
-    let initial_dir = cfg.dir.join(&initial_day);
-    let _ = fs::create_dir_all(&initial_dir);
     append_log(&initial_dir, "START");
 
     let mut current_day = initial_day;
@@ -334,6 +403,17 @@ fn run_daemon(cfg: Config) {
             let _ = fs::create_dir_all(&day_dir);
             prior_worked_secs = 0;
             session_worked_secs = 0;
+            first_start_time = cfg
+                .start_time
+                .clone()
+                .unwrap_or_else(|| Local::now().format("%H:%M:%S").to_string());
+            current_shift = ShiftState {
+                date: today.clone(),
+                first_start: first_start_time.clone(),
+                current_session_start: Some(Local::now().format("%H:%M:%S").to_string()),
+                total_worked_secs: 0,
+            };
+            save_shift_state(&day_dir, &current_shift);
         }
 
         if prev_paused != is_paused {
@@ -366,10 +446,13 @@ fn run_daemon(cfg: Config) {
             };
             work_remaining.store(rem_work, Ordering::Relaxed);
 
+            current_shift.total_worked_secs = total_worked;
+            save_shift_state(&cfg.dir.join(&current_day), &current_shift);
+
             let stats_path = runtime_dir().join("worktrack.stats");
             let _ = fs::write(
                 stats_path,
-                format!("{prior_worked_secs}\n{session_worked_secs}\n{daily_goal_secs}\n{rem_work}"),
+                format!("{prior_worked_secs}\n{session_worked_secs}\n{daily_goal_secs}\n{rem_work}\n{first_start_time}\n{session_start_time}"),
             );
         }
 
@@ -407,6 +490,9 @@ fn run_daemon(cfg: Config) {
 
     let today = Local::now().format("%Y-%m-%d").to_string();
     let day_dir = cfg.dir.join(&today);
+    current_shift.current_session_start = None;
+    current_shift.total_worked_secs = prior_worked_secs + session_worked_secs;
+    save_shift_state(&day_dir, &current_shift);
     append_log(&day_dir, "STOP");
 
     let _ = fs::remove_file(runtime_dir().join("worktrack.stats"));
@@ -444,43 +530,63 @@ fn print_status(cfg: &Config) {
             println!("Статус: ОСТАНОВЛЕН");
         }
     }
+
     let count = count_screenshots_today(&cfg.dir);
-    println!("Скриншотов за сегодня: {count}");
-
     let daily_goal_secs = (cfg.daily_hours * 3600.0).round() as u64;
+    let today = Local::now().format("%Y-%m-%d").to_string();
+    let day_dir = cfg.dir.join(&today);
 
-    let (prior_secs, session_secs, total_worked_secs, rem_secs) = if is_running {
-        let stats_path = runtime_dir().join("worktrack.stats");
-        if let Ok(content) = fs::read_to_string(&stats_path) {
-            let lines: Vec<&str> = content.lines().collect();
-            if lines.len() >= 4 {
-                let prior = lines[0].parse::<u64>().unwrap_or(0);
-                let session = lines[1].parse::<u64>().unwrap_or(0);
-                let _goal = lines[2].parse::<u64>().unwrap_or(daily_goal_secs);
-                let rem = lines[3].parse::<i64>().unwrap_or(0);
-                (prior, session, prior + session, rem)
+    let (prior_secs, session_secs, total_worked_secs, rem_secs, first_start, session_start) =
+        if is_running {
+            let stats_path = runtime_dir().join("worktrack.stats");
+            if let Ok(content) = fs::read_to_string(&stats_path) {
+                let lines: Vec<&str> = content.lines().collect();
+                if lines.len() >= 4 {
+                    let prior = lines[0].parse::<u64>().unwrap_or(0);
+                    let session = lines[1].parse::<u64>().unwrap_or(0);
+                    let _goal = lines[2].parse::<u64>().unwrap_or(daily_goal_secs);
+                    let rem = lines[3].parse::<i64>().unwrap_or(0);
+                    let first_s = lines.get(4).filter(|s| !s.is_empty()).map(|s| s.to_string());
+                    let sess_s = lines.get(5).filter(|s| !s.is_empty()).map(|s| s.to_string());
+                    (prior, session, prior + session, rem, first_s, sess_s)
+                } else {
+                    let (first_s, prior) = load_shift_state(&day_dir, &today, cfg);
+                    let rem = (daily_goal_secs as i64) - (prior as i64);
+                    (prior, 0, prior, rem, first_s, None)
+                }
             } else {
-                let prior = (count as u64) * cfg.interval_secs;
-                let total = prior;
-                let rem = (daily_goal_secs as i64) - (total as i64);
-                (prior, 0, total, rem)
+                let (first_s, prior) = load_shift_state(&day_dir, &today, cfg);
+                let rem = (daily_goal_secs as i64) - (prior as i64);
+                (prior, 0, prior, rem, first_s, None)
             }
         } else {
-            let prior = (count as u64) * cfg.interval_secs;
-            let total = prior;
-            let rem = (daily_goal_secs as i64) - (total as i64);
-            (prior, 0, total, rem)
+            let (first_s, prior) = load_shift_state(&day_dir, &today, cfg);
+            let rem = (daily_goal_secs as i64) - (prior as i64);
+            (prior, 0, prior, rem, first_s, None)
+        };
+
+    if let Some(ref first_s) = first_start {
+        if is_running
+            && let Some(ref s_start) = session_start
+            && s_start != first_s
+        {
+            println!("Время начала смены: {first_s} (текущая сессия с {s_start})");
+        } else {
+            println!("Время начала смены: {first_s}");
         }
     } else {
-        let prior = (count as u64) * cfg.interval_secs;
-        let total = prior;
-        let rem = (daily_goal_secs as i64) - (total as i64);
-        (prior, 0, total, rem)
-    };
+        println!("Смена сегодня ещё не начата");
+    }
+
+    println!("Скриншотов за сегодня: {count}");
 
     let goal_str = format_duration_hm(daily_goal_secs);
     let total_str = format_duration_hm(total_worked_secs);
-    let percent = ((total_worked_secs as f64 / daily_goal_secs as f64) * 100.0).min(100.0);
+    let percent = if daily_goal_secs > 0 {
+        ((total_worked_secs as f64 / daily_goal_secs as f64) * 100.0).min(100.0)
+    } else {
+        100.0
+    };
 
     println!("Цель на день: {goal_str} (WORKTRACK_DAILY_HOURS={})", cfg.daily_hours);
     if is_running && prior_secs > 0 {
@@ -497,7 +603,14 @@ fn print_status(cfg: &Config) {
             println!("Норма на сегодня полностью выполнена!");
         }
     } else {
-        println!("Осталось отработать сегодня: {}", format_duration_hm(rem_secs as u64));
+        let rem_u = rem_secs as u64;
+        println!("Осталось отработать сегодня: {}", format_duration_hm(rem_u));
+        let est_end = Local::now() + chrono::Duration::seconds(rem_secs);
+        if is_running {
+            println!("Расчётное окончание рабочего дня: {}", est_end.format("%H:%M:%S"));
+        } else {
+            println!("Расчётное окончание (если продолжить сейчас): {}", est_end.format("%H:%M:%S"));
+        }
     }
 
     if let Some(ref ws) = cfg.workspace {
@@ -781,4 +894,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shift_state_persistence() {
+        let temp_dir = std::env::temp_dir().join("test_worktrack_shift_state");
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let cfg = Config::default();
+        let today = "2026-11-03";
+
+        let state = ShiftState {
+            date: today.to_string(),
+            first_start: "09:00:00".to_string(),
+            current_session_start: Some("13:00:00".to_string()),
+            total_worked_secs: 7200,
+        };
+
+        save_shift_state(&temp_dir, &state);
+
+        let (first_start, worked_secs) = load_shift_state(&temp_dir, today, &cfg);
+        assert_eq!(first_start, Some("09:00:00".to_string()));
+        assert_eq!(worked_secs, 7200);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
 }

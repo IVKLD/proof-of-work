@@ -6,6 +6,7 @@ pub struct Config {
     pub dir: PathBuf,
     pub interval_secs: u64,
     pub daily_hours: f32,
+    pub start_time: Option<String>,
     pub output: Option<String>,
     pub workspace: Option<String>,
     pub scale: Option<f32>,
@@ -36,6 +37,7 @@ impl Default for Config {
             dir: PathBuf::from(home).join("worklog"),
             interval_secs: 60,
             daily_hours: 8.0,
+            start_time: None,
             output: None,
             workspace: None,
             scale: None,
@@ -74,6 +76,9 @@ impl Config {
                                 {
                                     cfg.daily_hours = h;
                                 }
+                            }
+                            "WORKTRACK_START_TIME" if !val.is_empty() => {
+                                cfg.start_time = Some(val.to_string());
                             }
                             "WORKTRACK_OUTPUT" if !val.is_empty() => {
                                 cfg.output = Some(val.to_string());
@@ -118,6 +123,12 @@ impl Config {
             && h > 0.0
         {
             cfg.daily_hours = h;
+        }
+        if let Ok(val) = std::env::var("WORKTRACK_START_TIME") {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                cfg.start_time = Some(trimmed.to_string());
+            }
         }
         if let Ok(val) = std::env::var("WORKTRACK_OUTPUT") {
             let trimmed = val.trim();
