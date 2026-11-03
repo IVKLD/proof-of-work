@@ -41,6 +41,12 @@ enum Commands {
     Pause,
     /// Снять с паузы (индикатор станет красным, снимок сразу)
     Resume,
+    /// Сбросить рабочую смену за сегодня (с подтверждением)
+    Reset {
+        /// Пропустить подтверждение (сброс без запроса)
+        #[arg(short, long)]
+        yes: bool,
+    },
     /// Остановить трекер, собрать архив за сегодня и выгрузить
     Stop,
     /// Показать текущий статус трекера и количество снимков
@@ -76,6 +82,10 @@ fn pid_file_path() -> PathBuf {
 
 fn pause_file_path() -> PathBuf {
     runtime_dir().join("worktrack.paused")
+}
+
+fn reset_file_path() -> PathBuf {
+    runtime_dir().join("worktrack.reset")
 }
 
 fn is_process_running(pid: i32) -> bool {
@@ -380,6 +390,29 @@ fn run_daemon(cfg: Config) {
     let mut last_second_tick = std::time::Instant::now();
 
     while running.load(Ordering::SeqCst) {
+        let reset_file = reset_file_path();
+        if reset_file.exists() {
+            let _ = fs::remove_file(&reset_file);
+            prior_worked_secs = 0;
+            session_worked_secs = 0;
+            let now_s = Local::now().format("%H:%M:%S").to_string();
+            first_start_time = cfg.start_time.clone().unwrap_or_else(|| now_s.clone());
+            current_shift = ShiftState {
+                date: current_day.clone(),
+                first_start: first_start_time.clone(),
+                current_session_start: Some(now_s.clone()),
+                total_worked_secs: 0,
+            };
+            save_shift_state(&cfg.dir.join(&current_day), &current_shift);
+            work_remaining.store(daily_goal_secs as i64, Ordering::Relaxed);
+            let stats_path = runtime_dir().join("worktrack.stats");
+            let _ = fs::write(
+                stats_path,
+                format!("0\n0\n{daily_goal_secs}\n{daily_goal_secs}\n{first_start_time}\n{now_s}"),
+            );
+            append_log(&cfg.dir.join(&current_day), "RESET");
+        }
+
         let is_paused = pause_file_path().exists();
         paused.store(is_paused, Ordering::Relaxed);
 
@@ -484,6 +517,7 @@ fn run_daemon(cfg: Config) {
     let _ = fs::remove_file(runtime_dir().join("worktrack.stats"));
     let _ = fs::remove_file(pid_file_path());
     let _ = fs::remove_file(pause_file_path());
+    let _ = fs::remove_file(reset_file_path());
     let _ = ind_thread.join();
 }
 
@@ -723,7 +757,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => {
             print_status(&cfg);
             println!(
-                "\nДоступные команды: worktrack <start|shot|pause|resume|status|workspaces|windows|stop|pack|upload|completions>"
+                "\nДоступные команды: worktrack <start|shot|pause|resume|reset|status|workspaces|windows|stop|pack|upload|completions>"
             );
             println!("Подробная справка по аргументам: worktrack --help");
         }
@@ -787,6 +821,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Трекер снят с паузы (индикатор красный)");
         }
 
+        Some(Commands::Reset { yes }) => {
+            let today = Local::now().format("%Y-%m-%d").to_string();
+            let day_dir = cfg.dir.join(&today);
+            let _ = fs::create_dir_all(&day_dir);
+
+            if !yes {
+                println!("Внимание: сброс рабочей смены за сегодня ({today}).");
+                println!("Накопленное время и таймер рабочего дня будут обнулены.");
+                print!("Вы уверены, что хотите сбросить смену? [y/N]: ");
+                std::io::stdout().flush()?;
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                let ans = input.trim().to_lowercase();
+                if ans != "y" && ans != "yes" && ans != "д" && ans != "да" {
+                    println!("Сброс отменён.");
+                    return Ok(());
+                }
+            }
+
+            if get_running_pid().is_some() {
+                let reset_file = reset_file_path();
+                let _ = fs::File::create(&reset_file);
+                for _ in 0..10 {
+                    if !reset_file.exists() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                println!("Рабочая смена успешно сброшена! Счётчик обнулён.");
+            } else {
+                let shift = ShiftState {
+                    date: today.clone(),
+                    first_start: cfg
+                        .start_time
+                        .clone()
+                        .unwrap_or_else(|| Local::now().format("%H:%M:%S").to_string()),
+                    current_session_start: None,
+                    total_worked_secs: 0,
+                };
+                save_shift_state(&day_dir, &shift);
+                append_log(&day_dir, "RESET");
+                println!("Рабочая смена за сегодня успешно сброшена (счётчик обнулён).");
+            }
+        }
+
         Some(Commands::Status) => {
             print_status(&cfg);
         }
@@ -844,6 +923,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let _ = fs::remove_file(pause_file_path());
             let _ = fs::remove_file(pid_file_path());
+            let _ = fs::remove_file(reset_file_path());
 
             let today = Local::now().format("%Y-%m-%d").to_string();
             match archive::pack_day(&cfg.dir, &today) {
