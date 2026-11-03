@@ -51,7 +51,6 @@ pub struct IndicatorState {
     pub surfaces: Vec<MonitorSurface>,
     pub qh: QueueHandle<IndicatorState>,
     pub paused: Arc<AtomicBool>,
-    pub hidden: Arc<AtomicBool>,
     pub running: Arc<AtomicBool>,
     pub countdown: Arc<AtomicI64>,
     pub work_remaining: Arc<AtomicI64>,
@@ -299,7 +298,6 @@ impl IndicatorState {
 
     pub fn draw_all(&mut self) {
         let is_paused = self.paused.load(Ordering::Relaxed);
-        let is_hidden = self.hidden.load(Ordering::Relaxed);
         let remaining = self.countdown.load(Ordering::Relaxed);
         let work_rem = self.work_remaining.load(Ordering::Relaxed);
         let current_target = self.target_output.read().ok().and_then(|g| g.clone());
@@ -326,7 +324,7 @@ impl IndicatorState {
                     wl_shm::Format::Argb8888,
                 ) {
                     canvas.fill(0);
-                    if !is_hidden && is_target_screen {
+                    if is_target_screen {
                         render_indicator_pill(
                             canvas,
                             phys_w as u32,
@@ -503,7 +501,6 @@ pub fn render_indicator_pill(
 
 pub fn run_indicator(
     paused: Arc<AtomicBool>,
-    hidden: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     countdown: Arc<AtomicI64>,
     work_remaining: Arc<AtomicI64>,
@@ -543,7 +540,6 @@ pub fn run_indicator(
         surfaces: Vec::new(),
         qh: qh.clone(),
         paused,
-        hidden,
         running: running.clone(),
         countdown,
         work_remaining,
@@ -571,7 +567,6 @@ pub fn run_indicator(
     let _ = event_queue.roundtrip(&mut state);
 
     let mut last_paused = state.paused.load(Ordering::Relaxed);
-    let mut last_hidden = state.hidden.load(Ordering::Relaxed);
     let mut last_countdown = state.countdown.load(Ordering::Relaxed);
     let mut last_work_rem = state.work_remaining.load(Ordering::Relaxed);
     let mut last_target = state.target_output.read().ok().and_then(|g| g.clone());
@@ -581,19 +576,16 @@ pub fn run_indicator(
         let _ = event_queue.dispatch_pending(&mut state);
 
         let current_paused = state.paused.load(Ordering::Relaxed);
-        let current_hidden = state.hidden.load(Ordering::Relaxed);
         let current_countdown = state.countdown.load(Ordering::Relaxed);
         let current_work_rem = state.work_remaining.load(Ordering::Relaxed);
         let current_target = state.target_output.read().ok().and_then(|g| g.clone());
 
         if current_paused != last_paused
-            || current_hidden != last_hidden
             || current_countdown != last_countdown
             || current_work_rem != last_work_rem
             || current_target != last_target
         {
             last_paused = current_paused;
-            last_hidden = current_hidden;
             last_countdown = current_countdown;
             last_work_rem = current_work_rem;
             last_target = current_target;

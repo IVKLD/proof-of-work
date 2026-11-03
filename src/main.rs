@@ -107,7 +107,6 @@ fn append_log(day_dir: &Path, msg: &str) {
 fn capture_screen(
     day_dir: &Path,
     cfg: &Config,
-    hidden: Option<&Arc<AtomicBool>>,
     target_output_holder: Option<&Arc<std::sync::RwLock<Option<String>>>>,
 ) {
     let now_stamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -192,17 +191,8 @@ fn capture_screen(
         });
     }
 
-    // 2. Perform capture (briefly hide indicator badge so it does not appear on screenshot)
-    if let Some(h) = hidden {
-        h.store(true, Ordering::SeqCst);
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
+    // 2. Perform capture
     let res = niri::capture_screenshot(&file_str, Some(&target_output));
-
-    if let Some(h) = hidden {
-        h.store(false, Ordering::SeqCst);
-    }
 
     // 3. Restore previous workspace/window if we switched
     if needs_restore {
@@ -314,7 +304,6 @@ fn run_daemon(cfg: Config) {
 
     let running = Arc::new(AtomicBool::new(true));
     let paused = Arc::new(AtomicBool::new(pause_file_path().exists()));
-    let hidden = Arc::new(AtomicBool::new(false));
 
     // Hook signals
     let r_sig = running.clone();
@@ -362,7 +351,6 @@ fn run_daemon(cfg: Config) {
     // Start Wayland indicator thread
     let ind_running = running.clone();
     let ind_paused = paused.clone();
-    let ind_hidden = hidden.clone();
     let countdown = Arc::new(std::sync::atomic::AtomicI64::new(cfg.interval_secs as i64));
     let work_remaining = Arc::new(std::sync::atomic::AtomicI64::new(initial_rem_work));
     let ind_countdown = countdown.clone();
@@ -372,7 +360,6 @@ fn run_daemon(cfg: Config) {
     let ind_thread = std::thread::spawn(move || {
         indicator::run_indicator(
             ind_paused,
-            ind_hidden,
             ind_running,
             ind_countdown,
             ind_work_rem,
@@ -475,12 +462,11 @@ fn run_daemon(cfg: Config) {
             let cap_cfg = cfg.clone();
             let day_dir = cfg.dir.join(&today);
             let _ = fs::create_dir_all(&day_dir);
-            let cap_hidden = hidden.clone();
             let cap_target = target_output.clone();
             let cap_flag = capturing.clone();
 
             std::thread::spawn(move || {
-                capture_screen(&day_dir, &cap_cfg, Some(&cap_hidden), Some(&cap_target));
+                capture_screen(&day_dir, &cap_cfg, Some(&cap_target));
                 cap_flag.store(false, Ordering::SeqCst);
             });
         }
@@ -774,7 +760,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let today = Local::now().format("%Y-%m-%d").to_string();
             let day_dir = cfg.dir.join(&today);
             let _ = fs::create_dir_all(&day_dir);
-            capture_screen(&day_dir, &cfg, None, None);
+            capture_screen(&day_dir, &cfg, None);
             let count = count_screenshots_today(&cfg.dir);
             println!("Снимок сохранён в {day_dir:?} (всего за день: {count})");
         }
