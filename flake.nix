@@ -16,8 +16,10 @@
           pkgs = nixpkgs.legacyPackages.${system};
         in
         {
-          default = pkgs.callPackage ./default.nix { };
+          default = pkgs.callPackage ./package-bin.nix { };
           worktrack = self.packages.${system}.default;
+          worktrack-bin = self.packages.${system}.default;
+          source = pkgs.callPackage ./default.nix { };
         });
 
       apps = eachSystem (system: {
@@ -37,7 +39,8 @@
         });
 
       overlays.default = final: _prev: {
-        worktrack = final.callPackage ./default.nix { };
+        worktrack = final.callPackage ./package-bin.nix { };
+        worktrack-source = final.callPackage ./default.nix { };
       };
 
       nixosModules.default = { config, lib, pkgs, ... }:
