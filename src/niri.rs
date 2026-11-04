@@ -431,7 +431,9 @@ pub fn capture_screenshot(
     }
     cmd.arg(path);
 
-    let status = cmd.status()?;
+    let status = cmd.status().map_err(|e| {
+        format!("Не удалось запустить 'grim': {e}. Убедитесь, что утилита 'grim' установлена и доступна в PATH")
+    })?;
     if status.success() {
         Ok(out_name)
     } else {

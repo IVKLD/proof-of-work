@@ -882,7 +882,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(Commands::Shot) => {
             let today = Local::now().format("%Y-%m-%d").to_string();
             let day_dir = cfg.dir.join(&today);
-            let _ = fs::create_dir_all(&day_dir);
+            fs::create_dir_all(&day_dir)?;
             let path = capture_screen(&day_dir, &cfg, None)?;
             let count = count_screenshots_today(&cfg.dir);
             println!("Снимок сохранён в {path:?} (всего за день: {count})");
