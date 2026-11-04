@@ -122,9 +122,11 @@ impl OutputHandler for IndicatorState {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
+        output: wl_output::WlOutput,
     ) {
-        // Wait until update_output receives full output metadata (resolution, modes, name)
+        if !self.surfaces.iter().any(|s| s.output.as_ref() == Some(&output)) {
+            self.create_surface_for_output(Some(&output));
+        }
     }
 
     fn update_output(
@@ -158,6 +160,7 @@ impl OutputHandler for IndicatorState {
                 break;
             }
         }
+        self.draw_all();
     }
 
     fn output_destroyed(
@@ -302,12 +305,20 @@ impl IndicatorState {
         let work_rem = self.work_remaining.load(Ordering::Relaxed);
         let current_target = self.target_output.read().ok().and_then(|g| g.clone());
 
+        let any_target_matched = self.surfaces.iter().any(|s| {
+            match (&s.output_name, &current_target) {
+                (Some(name), Some(target)) => name == target,
+                _ => false,
+            }
+        });
+
         for s in &mut self.surfaces {
-            // Check if this surface is on the target screen
+            // Check if this surface is on the target screen.
+            // If target output doesn't match any surface yet (or None), display on all
+            // so indicator never completely vanishes due to output metadata timing.
             let is_target_screen = match (&s.output_name, &current_target) {
                 (Some(name), Some(target)) => name == target,
-                (None, Some(_)) => false,
-                (_, None) => true,
+                _ => !any_target_matched,
             };
 
             // Draw indicator pill with countdown & dot
@@ -338,8 +349,12 @@ impl IndicatorState {
 
                     let surface = s.indicator_layer.wl_surface();
                     surface.set_buffer_scale(scale);
-                    surface.attach(Some(buffer.wl_buffer()), 0, 0);
                     surface.damage_buffer(0, 0, phys_w, phys_h);
+                    // Use buffer.attach_to to activate slot lifecycle in SCTK, preventing
+                    // premature destruction before compositor releases the buffer.
+                    if let Err(e) = buffer.attach_to(surface) {
+                        eprintln!("Indicator buffer attach error: {e:?}");
+                    }
                     s.indicator_layer.commit();
                 }
             }
@@ -633,13 +648,15 @@ pub fn run_indicator(
             target_output.clone(),
         );
 
-        if res.is_err() && running.load(Ordering::Relaxed) {
-            // If connection broke (compositor reload/restart), wait 1s before reconnecting
-            for _ in 0..10 {
-                if !running.load(Ordering::Relaxed) {
-                    break;
+        if let Err(ref e) = res {
+            if running.load(Ordering::Relaxed) {
+                eprintln!("Wayland indicator session error: {e:?}, reconnecting in 1s...");
+                for _ in 0..10 {
+                    if !running.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
                 }
-                std::thread::sleep(Duration::from_millis(100));
             }
         }
     }

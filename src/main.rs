@@ -167,14 +167,16 @@ fn capture_screen(
         prev_focused_output,
     ) = if let Some(ref ws) = target_ws {
         let all_outputs = niri::get_all_outputs().unwrap_or_default();
-        let out_name = ws
-            .output
-            .clone()
-            .or_else(|| cfg.output.clone())
-            .filter(|o| all_outputs.iter().any(|ao| ao.name == *o))
-            .or_else(|| niri::get_focused_output().map(|o| o.name))
-            .or_else(|| all_outputs.first().map(|o| o.name.clone()))
-            .unwrap_or_else(|| "DP-1".to_string());
+        let out_name = if let Some(ref configured_out) = cfg.output {
+            configured_out.clone()
+        } else if let Some(ref ws_out) = ws.output {
+            ws_out.clone()
+        } else {
+            niri::get_focused_output()
+                .map(|o| o.name)
+                .or_else(|| all_outputs.first().map(|o| o.name.clone()))
+                .unwrap_or_else(|| "DP-1".to_string())
+        };
 
         if ws.is_active {
             // Workspace is already visible on its output: no switching needed!
@@ -215,13 +217,14 @@ fn capture_screen(
             );
         }
         let all_outputs = niri::get_all_outputs().unwrap_or_default();
-        let out_name = cfg
-            .output
-            .clone()
-            .filter(|o| all_outputs.iter().any(|ao| ao.name == *o))
-            .or_else(|| niri::get_focused_output().map(|o| o.name))
-            .or_else(|| all_outputs.first().map(|o| o.name.clone()))
-            .unwrap_or_else(|| "DP-1".to_string());
+        let out_name = if let Some(ref configured_out) = cfg.output {
+            configured_out.clone()
+        } else {
+            niri::get_focused_output()
+                .map(|o| o.name)
+                .or_else(|| all_outputs.first().map(|o| o.name.clone()))
+                .unwrap_or_else(|| "DP-1".to_string())
+        };
         (out_name, None, false, None, None, None)
     };
 
