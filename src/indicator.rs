@@ -28,7 +28,7 @@ use wayland_client::{
     protocol::{wl_output, wl_shm, wl_surface},
 };
 
-const LOGICAL_WIDTH: u32 = 186;
+const LOGICAL_WIDTH: u32 = 170;
 const LOGICAL_HEIGHT: u32 = 24;
 const FONT_DATA: &[u8] = include_bytes!("../assets/font.ttf");
 
@@ -424,9 +424,20 @@ pub fn render_indicator_pill(
 
     let text = format!("{clock_text} | {shot_text} | {work_text}");
 
+    let dot_radius = 4.0 * total_scale;
+    let gap_text_to_dot = 7.0 * total_scale;
+    let mut dot_cx = w_f - (12.0 * total_scale);
+    let dot_cy = h_f / 2.0;
+
     if let Ok(font) = FontRef::try_from_slice(FONT_DATA) {
         let font_scale = PxScale::from(12.0 * total_scale);
         let scaled = font.as_scaled(font_scale);
+
+        let (tw, _th) = text_size(font_scale, &font, &text);
+        let total_content_w = tw as f32 + gap_text_to_dot + (dot_radius * 2.0);
+        let start_x = ((w_f - total_content_w) / 2.0).max(6.0 * total_scale);
+        let tx = start_x.round() as i32;
+        dot_cx = start_x + tw as f32 + gap_text_to_dot + dot_radius;
 
         let mut min_y = f32::MAX;
         let mut max_y = f32::MIN;
@@ -446,7 +457,6 @@ pub fn render_indicator_pill(
             th as f32 / 2.0
         };
 
-        let tx = (9.0 * total_scale).round() as i32;
         let ty = ((h_f / 2.0) - text_center_offset).round() as i32;
 
         draw_text_mut(
@@ -461,9 +471,6 @@ pub fn render_indicator_pill(
     }
 
     // 3. Status indicator dot (red, amber, or green)
-    let dot_cx = w_f - (12.0 * total_scale);
-    let dot_cy = h_f / 2.0;
-    let dot_radius = 4.2 * total_scale;
     let (base_r, base_g, base_b) = if is_paused {
         (244.0f32, 162.0f32, 97.0f32) // Amber
     } else if work_remaining <= 0 {
@@ -674,6 +681,17 @@ mod tests {
 
         // 1. Test countdown "HH:MM | 1:00 | 7h 45m"
         render_indicator_pill(&mut canvas, w, h, 2.2, false, 60, 7 * 3600 + 45 * 60);
+        let font = FontRef::try_from_slice(FONT_DATA).unwrap();
+        let font_scale = PxScale::from(12.0 * 2.2);
+        let (tw, _) = text_size(font_scale, &font, "00:00 | 1:00 | 7h 45m");
+        let dot_radius = 4.0 * 2.2;
+        let gap_text_to_dot = 7.0 * 2.2;
+        let total_content_w = tw as f32 + gap_text_to_dot + (dot_radius * 2.0);
+        let start_x = ((w as f32 - total_content_w) / 2.0).max(6.0 * 2.2);
+        let dot_cx = start_x + tw as f32 + gap_text_to_dot + dot_radius;
+        let gap = (dot_cx - dot_radius) - (start_x + tw as f32);
+        println!("Content centered in w={w}: start_x={start_x:.1}, tw={tw}, gap={gap:.1}");
+        assert!((gap - gap_text_to_dot).abs() < 0.01);
         let mut y_min = h;
         let mut y_max = 0;
         for y in 0..h {
