@@ -32,6 +32,14 @@ const LOGICAL_WIDTH: u32 = 170;
 const LOGICAL_HEIGHT: u32 = 24;
 const FONT_DATA: &[u8] = include_bytes!("../assets/font.ttf");
 
+fn apply_layer_geometry(layer: &LayerSurface, scale: f32) {
+    let w = (LOGICAL_WIDTH as f32 * scale).round() as u32;
+    let h = (LOGICAL_HEIGHT as f32 * scale).round() as u32;
+    let m = (12.0 * scale).round() as i32;
+    layer.set_size(w, h);
+    layer.set_margin(m, m, 0, 0);
+}
+
 pub struct MonitorSurface {
     pub output: Option<wl_output::WlOutput>,
     pub output_name: Option<String>,
@@ -76,41 +84,10 @@ impl CompositorHandler for IndicatorState {
         self.draw_all();
     }
 
-    fn frame(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _time: u32,
-    ) {
-    }
-
-    fn surface_enter(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _output: &wl_output::WlOutput,
-    ) {
-    }
-
-    fn surface_leave(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _output: &wl_output::WlOutput,
-    ) {
-    }
-
-    fn transform_changed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _new_transform: wayland_client::protocol::wl_output::Transform,
-    ) {
-    }
+    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {}
+    fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
+    fn surface_leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
+    fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: wl_output::Transform) {}
 }
 
 impl OutputHandler for IndicatorState {
@@ -150,11 +127,7 @@ impl OutputHandler for IndicatorState {
                 }
                 if (s.ui_scale - new_ui_scale).abs() > 0.01 {
                     s.ui_scale = new_ui_scale;
-                    let logical_w = (LOGICAL_WIDTH as f32 * new_ui_scale).round() as u32;
-                    let logical_h = (LOGICAL_HEIGHT as f32 * new_ui_scale).round() as u32;
-                    let logical_margin = (12.0 * new_ui_scale).round() as i32;
-                    s.indicator_layer.set_size(logical_w, logical_h);
-                    s.indicator_layer.set_margin(logical_margin, logical_margin, 0, 0);
+                    apply_layer_geometry(&s.indicator_layer, new_ui_scale);
                     s.indicator_layer.commit();
                 }
                 break;
@@ -253,11 +226,6 @@ impl IndicatorState {
         }
 
         let ui_scale = self.compute_ui_scale(output);
-        let logical_w = (LOGICAL_WIDTH as f32 * ui_scale).round() as u32;
-        let logical_h = (LOGICAL_HEIGHT as f32 * ui_scale).round() as u32;
-        let logical_margin = (12.0 * ui_scale).round() as i32;
-
-        // 1. Overlay indicator surface
         let ind_surface = self.compositor_state.create_surface(&self.qh);
         let indicator_layer = self.layer_shell.create_layer_surface(
             &self.qh,
@@ -267,9 +235,8 @@ impl IndicatorState {
             output,
         );
 
-        indicator_layer.set_size(logical_w, logical_h);
+        apply_layer_geometry(&indicator_layer, ui_scale);
         indicator_layer.set_anchor(Anchor::TOP | Anchor::RIGHT);
-        indicator_layer.set_margin(logical_margin, logical_margin, 0, 0);
         indicator_layer.set_keyboard_interactivity(KeyboardInteractivity::None);
 
         if let Ok(region) = smithay_client_toolkit::compositor::Region::new(&self.compositor_state)
@@ -306,19 +273,17 @@ impl IndicatorState {
         let current_target = self.target_output.read().ok().and_then(|g| g.clone());
 
         let any_target_matched = self.surfaces.iter().any(|s| {
-            match (&s.output_name, &current_target) {
-                (Some(name), Some(target)) => name == target,
-                _ => false,
-            }
+            s.output_name.as_ref() == current_target.as_ref() && current_target.is_some()
         });
 
         for s in &mut self.surfaces {
             // Check if this surface is on the target screen.
             // If target output doesn't match any surface yet (or None), display on all
             // so indicator never completely vanishes due to output metadata timing.
-            let is_target_screen = match (&s.output_name, &current_target) {
-                (Some(name), Some(target)) => name == target,
-                _ => !any_target_matched,
+            let is_target_screen = if any_target_matched {
+                s.output_name.as_ref() == current_target.as_ref()
+            } else {
+                true
             };
 
             // Draw indicator pill with countdown & dot
@@ -409,17 +374,13 @@ pub fn render_indicator_pill(
     let work_text = if work_remaining <= 0 {
         let overtime = (-work_remaining) as u64;
         if overtime >= 60 {
-            let oh = overtime / 3600;
-            let om = (overtime % 3600) / 60;
-            format!("+{oh}h {om:02}m")
+            format!("+{}h {:02}m", overtime / 3600, (overtime % 3600) / 60)
         } else {
             "0h 00m".to_string()
         }
     } else {
         let rem = work_remaining as u64;
-        let rh = rem / 3600;
-        let rm = (rem % 3600) / 60;
-        format!("{rh}h {rm:02}m")
+        format!("{}h {:02}m", rem / 3600, (rem % 3600) / 60)
     };
 
     let text = format!("{clock_text} | {shot_text} | {work_text}");
@@ -692,36 +653,30 @@ mod tests {
         let gap = (dot_cx - dot_radius) - (start_x + tw as f32);
         println!("Content centered in w={w}: start_x={start_x:.1}, tw={tw}, gap={gap:.1}");
         assert!((gap - gap_text_to_dot).abs() < 0.01);
-        let mut y_min = h;
-        let mut y_max = 0;
-        for y in 0..h {
-            for x in 15..250 {
-                let idx = ((y * w + x) * 4) as usize;
-                let (b, g, r) = (canvas[idx], canvas[idx + 1], canvas[idx + 2]);
-                if r > 180 && g > 180 && b > 180 {
-                    if y < y_min { y_min = y; }
-                    if y > y_max { y_max = y; }
+        let text_y_bounds = |buf: &[u8]| {
+            let mut y_min = h;
+            let mut y_max = 0;
+            for y in 0..h {
+                for x in 15..250 {
+                    let idx = ((y * w + x) * 4) as usize;
+                    let (b, g, r) = (buf[idx], buf[idx + 1], buf[idx + 2]);
+                    if r > 180 && g > 180 && b > 180 {
+                        y_min = y_min.min(y);
+                        y_max = y_max.max(y);
+                    }
                 }
             }
-        }
+            (y_min, y_max)
+        };
+
+        let (y_min, y_max) = text_y_bounds(&canvas);
         println!("clock | 1:00 | 7h 45m -> top margin: {}, bottom margin: {}", y_min, h - 1 - y_max);
         assert!((y_min as i32 - (h - 1 - y_max) as i32).abs() <= 1);
 
         // 2. Test "HH:MM | PAUSE | 7h 45m"
         canvas.fill(0);
         render_indicator_pill(&mut canvas, w, h, 2.2, true, -1, 7 * 3600 + 45 * 60);
-        let mut p_min = h;
-        let mut p_max = 0;
-        for y in 0..h {
-            for x in 15..250 {
-                let idx = ((y * w + x) * 4) as usize;
-                let (b, g, r) = (canvas[idx], canvas[idx + 1], canvas[idx + 2]);
-                if r > 180 && g > 180 && b > 180 {
-                    if y < p_min { p_min = y; }
-                    if y > p_max { p_max = y; }
-                }
-            }
-        }
+        let (p_min, p_max) = text_y_bounds(&canvas);
         println!("clock | PAUSE | 7h 45m -> top margin: {}, bottom margin: {}", p_min, h - 1 - p_max);
         assert!((p_min as i32 - (h - 1 - p_max) as i32).abs() <= 1);
     }

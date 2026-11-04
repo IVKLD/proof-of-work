@@ -1,10 +1,29 @@
+# Rust / Cargo
+/target/
+Cargo.lock.bak
+
+# Precompiled binaries and build outputs
+/bin/
 result
 result-*
+
+# Nix & Environment
 .direnv/
+.env
+*.env
+!*.env.example
 
+# Temporary files, logs, and archives
+*.tmp
+*.tmp.*
+*.log
+*.tar.gz
+events.log
+shift.json
 
-# Added by cargo
-
-/target
+# User assets and editor files
 Pasted image*.png
-
+.idea/
+.vscode/
+*.swp
+*~

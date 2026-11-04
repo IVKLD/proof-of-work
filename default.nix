@@ -4,8 +4,6 @@
 , wayland
 , makeWrapper
 , installShellFiles
-, bash
-, coreutils
 , grim
 }:
 
@@ -35,7 +33,7 @@ rustPlatform.buildRustPackage {
       --fish <($out/bin/worktrack completions fish)
 
     wrapProgram $out/bin/worktrack \
-      --prefix PATH : ${lib.makeBinPath [ bash coreutils grim ]}
+      --prefix PATH : ${lib.makeBinPath [ grim ]}
   '';
 
   meta = with lib; {

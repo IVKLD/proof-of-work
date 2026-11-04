@@ -76,24 +76,22 @@ enum Commands {
     Update,
 }
 
-fn runtime_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(dir)
-    } else {
-        PathBuf::from("/tmp")
-    }
+fn runtime_file(name: &str) -> PathBuf {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR").unwrap_or_else(|| "/tmp".into());
+    PathBuf::from(dir).join(format!("worktrack.{name}"))
 }
 
-fn pid_file_path() -> PathBuf {
-    runtime_dir().join("worktrack.pid")
-}
-
-fn pause_file_path() -> PathBuf {
-    runtime_dir().join("worktrack.paused")
-}
-
-fn reset_file_path() -> PathBuf {
-    runtime_dir().join("worktrack.reset")
+fn resolve_target_output(
+    cfg_out: Option<&str>,
+    ws_out: Option<&str>,
+    all_outputs: &[niri::OutputInfo],
+) -> String {
+    cfg_out
+        .or(ws_out)
+        .map(|s| s.to_string())
+        .or_else(|| niri::get_focused_output().map(|o| o.name))
+        .or_else(|| all_outputs.first().map(|o| o.name.clone()))
+        .unwrap_or_else(|| "DP-1".to_string())
 }
 
 fn is_process_running(pid: i32) -> bool {
@@ -114,14 +112,8 @@ fn is_process_running(pid: i32) -> bool {
 }
 
 fn get_running_pid() -> Option<i32> {
-    let path = pid_file_path();
-    let content = fs::read_to_string(&path).ok()?;
-    let pid = content.trim().parse::<i32>().ok()?;
-    if is_process_running(pid) {
-        Some(pid)
-    } else {
-        None
-    }
+    let pid = fs::read_to_string(runtime_file("pid")).ok()?.trim().parse().ok()?;
+    is_process_running(pid).then_some(pid)
 }
 
 fn append_log(day_dir: &Path, msg: &str) {
@@ -132,11 +124,32 @@ fn append_log(day_dir: &Path, msg: &str) {
     }
 }
 
+fn restore_focus(
+    prev_win_id: Option<u64>,
+    prev_active_ws: Option<niri::Workspace>,
+    prev_focused_output: Option<String>,
+) {
+    if let Some(win_id) = prev_win_id && niri::focus_window(win_id).is_ok() {
+        return;
+    }
+    if let Some(prev_ws) = prev_active_ws {
+        if let Some(ref out) = prev_ws.output {
+            let _ = niri::focus_monitor(out);
+        }
+        let _ = prev_ws.focus();
+        if let Some(ref prev_out) = prev_focused_output {
+            let _ = niri::focus_monitor(prev_out);
+        }
+    } else {
+        let _ = niri::focus_workspace_previous();
+    }
+}
+
 fn capture_screen(
     day_dir: &Path,
     cfg: &Config,
     target_output_holder: Option<&Arc<std::sync::RwLock<Option<String>>>>,
-) {
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let now_stamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let time_str = Local::now().format("%H-%M-%S").to_string();
 
@@ -155,10 +168,17 @@ fn capture_screen(
 
     // 1. Resolve target workspace and output
     let all_workspaces = niri::get_all_workspaces().unwrap_or_default();
+    let all_outputs = niri::get_all_outputs().unwrap_or_default();
     let target_ws = cfg
         .workspace
         .as_deref()
         .and_then(|q| niri::find_workspace(&all_workspaces, q, cfg.output.as_deref()));
+
+    let out_name = resolve_target_output(
+        cfg.output.as_deref(),
+        target_ws.as_ref().and_then(|w| w.output.as_deref()),
+        &all_outputs,
+    );
 
     let (
         target_output,
@@ -168,23 +188,9 @@ fn capture_screen(
         prev_active_ws,
         prev_focused_output,
     ) = if let Some(ref ws) = target_ws {
-        let all_outputs = niri::get_all_outputs().unwrap_or_default();
-        let out_name = if let Some(ref configured_out) = cfg.output {
-            configured_out.clone()
-        } else if let Some(ref ws_out) = ws.output {
-            ws_out.clone()
-        } else {
-            niri::get_focused_output()
-                .map(|o| o.name)
-                .or_else(|| all_outputs.first().map(|o| o.name.clone()))
-                .unwrap_or_else(|| "DP-1".to_string())
-        };
-
         if ws.is_active {
-            // Workspace is already visible on its output: no switching needed!
             (out_name, Some(ws.id), false, None, None, None)
         } else {
-            // Workspace is inactive: switch to it temporarily
             let prev_win = niri::get_focused_window_id();
             let prev_active = all_workspaces
                 .iter()
@@ -192,14 +198,8 @@ fn capture_screen(
                 .cloned();
             let prev_focused_out = niri::get_focused_output().map(|o| o.name);
 
-            // Switch to workspace
             let _ = niri::focus_monitor(&out_name);
-            if let Some(ref name) = ws.name {
-                let _ = niri::focus_workspace(name);
-            } else if let Some(idx) = ws.idx {
-                let _ = niri::focus_workspace(&idx.to_string());
-            }
-            // Settle time for workspace transition to complete before screenshot
+            let _ = ws.focus();
             std::thread::sleep(Duration::from_millis(380));
 
             (
@@ -218,15 +218,6 @@ fn capture_screen(
                 &format!("WARN: configured workspace '{q}' not found; falling back to output"),
             );
         }
-        let all_outputs = niri::get_all_outputs().unwrap_or_default();
-        let out_name = if let Some(ref configured_out) = cfg.output {
-            configured_out.clone()
-        } else {
-            niri::get_focused_output()
-                .map(|o| o.name)
-                .or_else(|| all_outputs.first().map(|o| o.name.clone()))
-                .unwrap_or_else(|| "DP-1".to_string())
-        };
         (out_name, None, false, None, None, None)
     };
 
@@ -255,31 +246,7 @@ fn capture_screen(
 
     // 3. Restore previous workspace/window if we switched
     if needs_restore {
-        let mut restored = false;
-        if let Some(win_id) = prev_win_id
-            && niri::focus_window(win_id).is_ok()
-        {
-            restored = true;
-        }
-        if !restored {
-            if let Some(prev_ws) = prev_active_ws {
-                if let Some(ref name) = prev_ws.name {
-                    let _ = niri::focus_workspace(name);
-                } else if let Some(idx) = prev_ws.idx {
-                    if let Some(ref out) = prev_ws.output {
-                        let _ = niri::focus_monitor(out);
-                    }
-                    let _ = niri::focus_workspace(&idx.to_string());
-                } else {
-                    let _ = niri::focus_workspace_previous();
-                }
-                if let Some(ref prev_out) = prev_focused_output {
-                    let _ = niri::focus_monitor(prev_out);
-                }
-            } else {
-                let _ = niri::focus_workspace_previous();
-            }
-        }
+        restore_focus(prev_win_id, prev_active_ws, prev_focused_output);
     }
 
     // 4. Apply watermark & blackout blocked apps if any
@@ -294,10 +261,12 @@ fn capture_screen(
             ) {
                 append_log(day_dir, &format!("WARN: could not stamp {file_name}: {err}"));
             }
+            Ok(file_path)
         }
         Err(err) => {
             append_log(day_dir, &format!("ERROR: screenshot failed: {err}"));
             let _ = fs::remove_file(&file_path);
+            Err(err)
         }
     }
 }
@@ -310,37 +279,41 @@ struct ShiftState {
     pub total_worked_secs: u64,
 }
 
+impl ShiftState {
+    fn new(date: String, start_time: Option<String>, now_s: String) -> Self {
+        let first_start = start_time.unwrap_or_else(|| now_s.clone());
+        Self {
+            date,
+            first_start,
+            current_session_start: Some(now_s),
+            total_worked_secs: 0,
+        }
+    }
+}
+
 fn shift_state_path(day_dir: &Path) -> PathBuf {
     day_dir.join("shift.json")
 }
 
+fn is_screenshot_file(p: &Path) -> bool {
+    p.extension()
+        .is_some_and(|ext| ext == "jpg" || ext == "jpeg" || ext == "png")
+}
+
 fn get_first_screenshot_time(dir: &Path, today: &str) -> Option<String> {
-    let day_dir = dir.join(today);
-    let mut shots: Vec<String> = fs::read_dir(day_dir)
+    let mut shots: Vec<String> = fs::read_dir(dir.join(today))
         .ok()?
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|ext| ext == "png" || ext == "jpg" || ext == "jpeg")
-        })
+        .flatten()
+        .filter(|e| is_screenshot_file(&e.path()))
         .filter_map(|e| e.file_name().into_string().ok())
         .collect();
     shots.sort();
-    for shot in shots {
-        if let Some(stem) = Path::new(&shot).file_stem().and_then(|s| s.to_str()) {
-            let clean_stem = stem.split('_').next().unwrap_or(stem);
-            let parts: Vec<&str> = clean_stem.split('-').collect();
-            if parts.len() == 3
-                && parts[0].chars().all(|c| c.is_ascii_digit())
-                && parts[1].chars().all(|c| c.is_ascii_digit())
-                && parts[2].chars().all(|c| c.is_ascii_digit())
-            {
-                return Some(format!("{}:{}:{}", parts[0], parts[1], parts[2]));
-            }
-        }
-    }
-    None
+    shots.into_iter().find_map(|shot| {
+        let clean = Path::new(&shot).file_stem()?.to_str()?.split('_').next()?;
+        let parts: Vec<&str> = clean.split('-').collect();
+        (parts.len() == 3 && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit())))
+            .then(|| parts.join(":"))
+    })
 }
 
 fn load_shift_state(day_dir: &Path, today: &str, cfg: &Config) -> (Option<String>, u64) {
@@ -370,7 +343,7 @@ fn save_shift_state(day_dir: &Path, state: &ShiftState) {
 }
 
 fn run_daemon(cfg: Config) {
-    let lock_path = runtime_dir().join("worktrack.lock");
+    let lock_path = runtime_file("lock");
     let lock_file = match OpenOptions::new()
         .write(true)
         .create(true)
@@ -388,10 +361,10 @@ fn run_daemon(cfg: Config) {
     let _lock_guard = lock_file;
 
     let pid = std::process::id() as i32;
-    let _ = fs::write(pid_file_path(), pid.to_string());
+    let _ = fs::write(runtime_file("pid"), pid.to_string());
 
     let running = Arc::new(AtomicBool::new(true));
-    let paused = Arc::new(AtomicBool::new(pause_file_path().exists()));
+    let paused = Arc::new(AtomicBool::new(runtime_file("paused").exists()));
 
     // Hook signals
     let r_sig = running.clone();
@@ -468,31 +441,25 @@ fn run_daemon(cfg: Config) {
     let mut last_second_tick = std::time::Instant::now();
 
     while running.load(Ordering::SeqCst) {
-        let reset_file = reset_file_path();
+        let reset_file = runtime_file("reset");
         if reset_file.exists() {
             let _ = fs::remove_file(&reset_file);
             prior_worked_secs = 0;
             session_worked_secs = 0;
             let now_s = Local::now().format("%H:%M:%S").to_string();
-            first_start_time = cfg.start_time.clone().unwrap_or_else(|| now_s.clone());
+            current_shift = ShiftState::new(current_day.clone(), cfg.start_time.clone(), now_s.clone());
+            first_start_time = current_shift.first_start.clone();
             session_start_time = now_s.clone();
-            current_shift = ShiftState {
-                date: current_day.clone(),
-                first_start: first_start_time.clone(),
-                current_session_start: Some(now_s.clone()),
-                total_worked_secs: 0,
-            };
             save_shift_state(&cfg.dir.join(&current_day), &current_shift);
             work_remaining.store(daily_goal_secs as i64, Ordering::Relaxed);
-            let stats_path = runtime_dir().join("worktrack.stats");
             let _ = fs::write(
-                stats_path,
+                runtime_file("stats"),
                 format!("0\n0\n{daily_goal_secs}\n{daily_goal_secs}\n{first_start_time}\n{now_s}"),
             );
             append_log(&cfg.dir.join(&current_day), "RESET");
         }
 
-        let is_paused = pause_file_path().exists();
+        let is_paused = runtime_file("paused").exists();
         paused.store(is_paused, Ordering::Relaxed);
 
         let today = Local::now().format("%Y-%m-%d").to_string();
@@ -507,14 +474,9 @@ fn run_daemon(cfg: Config) {
             prior_worked_secs = 0;
             session_worked_secs = 0;
             let now_s = Local::now().format("%H:%M:%S").to_string();
-            first_start_time = cfg.start_time.clone().unwrap_or_else(|| now_s.clone());
-            session_start_time = now_s.clone();
-            current_shift = ShiftState {
-                date: today.clone(),
-                first_start: first_start_time.clone(),
-                current_session_start: Some(now_s),
-                total_worked_secs: 0,
-            };
+            current_shift = ShiftState::new(today.clone(), cfg.start_time.clone(), now_s.clone());
+            first_start_time = current_shift.first_start.clone();
+            session_start_time = now_s;
             save_shift_state(&day_dir, &current_shift);
         }
 
@@ -558,9 +520,8 @@ fn run_daemon(cfg: Config) {
                 save_shift_state(&cfg.dir.join(&current_day), &current_shift);
             }
 
-            let stats_path = runtime_dir().join("worktrack.stats");
             let _ = fs::write(
-                stats_path,
+                runtime_file("stats"),
                 format!("{prior_worked_secs}\n{session_worked_secs}\n{daily_goal_secs}\n{rem_work}\n{first_start_time}\n{session_start_time}"),
             );
         }
@@ -596,7 +557,7 @@ fn run_daemon(cfg: Config) {
                 }
                 let _guard = FlagGuard(cap_flag);
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    capture_screen(&day_dir, &cap_cfg, Some(&cap_target));
+                    let _ = capture_screen(&day_dir, &cap_cfg, Some(&cap_target));
                 }));
             });
         }
@@ -611,17 +572,14 @@ fn run_daemon(cfg: Config) {
     save_shift_state(&day_dir, &current_shift);
     append_log(&day_dir, "STOP");
 
-    let _ = fs::remove_file(runtime_dir().join("worktrack.stats"));
-    let _ = fs::remove_file(pid_file_path());
-    let _ = fs::remove_file(pause_file_path());
-    let _ = fs::remove_file(reset_file_path());
+    for f in ["stats", "pid", "paused", "reset"] {
+        let _ = fs::remove_file(runtime_file(f));
+    }
     let _ = ind_thread.join();
 }
 
 fn format_duration_hm(secs: u64) -> String {
-    let h = secs / 3600;
-    let m = (secs % 3600) / 60;
-    let s = secs % 60;
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
     if h > 0 {
         format!("{h} ч {m:02} мин")
     } else if m > 0 {
@@ -632,9 +590,7 @@ fn format_duration_hm(secs: u64) -> String {
 }
 
 fn format_duration_hms(secs: u64) -> String {
-    let h = secs / 3600;
-    let m = (secs % 3600) / 60;
-    let s = secs % 60;
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
     if h > 0 {
         format!("{h} ч {m:02} мин {s:02} сек")
     } else if m > 0 {
@@ -660,24 +616,55 @@ fn format_file_size(bytes: u64) -> String {
     }
 }
 
+fn file_size_suffix(path: &Path) -> String {
+    fs::metadata(path)
+        .map(|m| format!(" ({})", format_file_size(m.len())))
+        .unwrap_or_default()
+}
+
+fn confirm_action(prompt: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    print!("{prompt} [y/N]: ");
+    std::io::stdout().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let ans = input.trim().to_lowercase();
+    Ok(matches!(ans.as_str(), "y" | "yes" | "д" | "да"))
+}
+
+struct RuntimeStats {
+    prior: u64,
+    session: u64,
+    _goal: u64,
+    rem: i64,
+    first_start: Option<String>,
+    session_start: Option<String>,
+}
+
+fn read_stats_file() -> Option<RuntimeStats> {
+    let content = fs::read_to_string(runtime_file("stats")).ok()?;
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.len() < 4 {
+        return None;
+    }
+    Some(RuntimeStats {
+        prior: lines[0].parse().ok()?,
+        session: lines[1].parse().ok()?,
+        _goal: lines[2].parse().ok()?,
+        rem: lines[3].parse().ok()?,
+        first_start: lines.get(4).filter(|s| !s.is_empty()).map(|s| s.to_string()),
+        session_start: lines.get(5).filter(|s| !s.is_empty()).map(|s| s.to_string()),
+    })
+}
+
 fn get_today_worked_secs(cfg: &Config) -> (u64, usize) {
     let today = Local::now().format("%Y-%m-%d").to_string();
-    let day_dir = cfg.dir.join(&today);
     let count = count_screenshots_today(&cfg.dir);
-
-    let is_running = get_running_pid().is_some();
-    if is_running {
-        let stats_path = runtime_dir().join("worktrack.stats");
-        if let Ok(content) = fs::read_to_string(&stats_path) {
-            let lines: Vec<&str> = content.lines().collect();
-            if lines.len() >= 2 {
-                let prior = lines[0].parse::<u64>().unwrap_or(0);
-                let session = lines[1].parse::<u64>().unwrap_or(0);
-                return (prior + session, count);
-            }
-        }
+    if get_running_pid().is_some()
+        && let Some(st) = read_stats_file()
+    {
+        return (st.prior + st.session, count);
     }
-    let (_, prior) = load_shift_state(&day_dir, &today, cfg);
+    let (_, prior) = load_shift_state(&cfg.dir.join(&today), &today, cfg);
     (prior, count)
 }
 
@@ -686,7 +673,7 @@ fn print_status(cfg: &Config) {
     let is_running = pid.is_some();
     match pid {
         Some(p) => {
-            let paused = pause_file_path().exists();
+            let paused = runtime_file("paused").exists();
             if paused {
                 println!("Статус: НА ПАУЗЕ (PID {p})");
             } else {
@@ -704,28 +691,8 @@ fn print_status(cfg: &Config) {
     let day_dir = cfg.dir.join(&today);
 
     let (prior_secs, session_secs, total_worked_secs, rem_secs, first_start, session_start) =
-        if is_running {
-            let stats_path = runtime_dir().join("worktrack.stats");
-            if let Ok(content) = fs::read_to_string(&stats_path) {
-                let lines: Vec<&str> = content.lines().collect();
-                if lines.len() >= 4 {
-                    let prior = lines[0].parse::<u64>().unwrap_or(0);
-                    let session = lines[1].parse::<u64>().unwrap_or(0);
-                    let _goal = lines[2].parse::<u64>().unwrap_or(daily_goal_secs);
-                    let rem = lines[3].parse::<i64>().unwrap_or(0);
-                    let first_s = lines.get(4).filter(|s| !s.is_empty()).map(|s| s.to_string());
-                    let sess_s = lines.get(5).filter(|s| !s.is_empty()).map(|s| s.to_string());
-                    (prior, session, prior + session, rem, first_s, sess_s)
-                } else {
-                    let (first_s, prior) = load_shift_state(&day_dir, &today, cfg);
-                    let rem = (daily_goal_secs as i64) - (prior as i64);
-                    (prior, 0, prior, rem, first_s, None)
-                }
-            } else {
-                let (first_s, prior) = load_shift_state(&day_dir, &today, cfg);
-                let rem = (daily_goal_secs as i64) - (prior as i64);
-                (prior, 0, prior, rem, first_s, None)
-            }
+        if is_running && let Some(st) = read_stats_file() {
+            (st.prior, st.session, st.prior + st.session, st.rem, st.first_start, st.session_start)
         } else {
             let (first_s, prior) = load_shift_state(&day_dir, &today, cfg);
             let rem = (daily_goal_secs as i64) - (prior as i64);
@@ -790,55 +757,38 @@ fn print_status(cfg: &Config) {
 }
 
 fn print_workspaces(cfg: &Config) {
-    let workspaces = match niri::get_all_workspaces() {
-        Ok(w) => w,
-        Err(e) => {
-            println!("Ошибка получения рабочих пространств niri: {e}");
-            return;
-        }
+    let Ok(workspaces) = niri::get_all_workspaces() else {
+        println!("Ошибка получения рабочих пространств niri");
+        return;
     };
     let windows = niri::get_all_windows().unwrap_or_default();
+    let matched_ws = cfg
+        .workspace
+        .as_deref()
+        .and_then(|q| niri::find_workspace(&workspaces, q, cfg.output.as_deref()));
 
     println!("Рабочие пространства niri (workspaces):");
     println!("{}", "-".repeat(70));
     for ws in &workspaces {
-        let is_active_str = if ws.is_active { " [активен]" } else { "" };
-        let is_focused_str = if ws.is_focused { " [фокус]" } else { "" };
-        let name_str = ws.name.as_deref().unwrap_or("<без имени>");
-        let out_str = ws.output.as_deref().unwrap_or("?");
-        let idx_str = ws
-            .idx
-            .map(|i| i.to_string())
-            .unwrap_or_else(|| "?".to_string());
-
-        let ws_wins: Vec<&niri::Window> = windows
-            .iter()
-            .filter(|w| w.workspace_id == Some(ws.id))
-            .collect();
-        let win_count = ws_wins.len();
-
-        let is_cfg_match = cfg
-            .workspace
-            .as_deref()
-            .is_some_and(|q| {
-                let name_match = ws
-                    .name
-                    .as_deref()
-                    .is_some_and(|n| n.eq_ignore_ascii_case(q));
-                let idx_match = ws.idx.is_some_and(|i| q == i.to_string());
-                let id_match = q == format!("id:{}", ws.id);
-                name_match || idx_match || id_match
-            });
-
-        let match_tag = if is_cfg_match {
+        let is_active = if ws.is_active { " [активен]" } else { "" };
+        let is_focused = if ws.is_focused { " [фокус]" } else { "" };
+        let name = ws.name.as_deref().unwrap_or("<без имени>");
+        let out = ws.output.as_deref().unwrap_or("?");
+        let idx = ws.idx.map_or_else(|| "?".into(), |i| i.to_string());
+        let match_tag = if matched_ws.as_ref().is_some_and(|m| m.id == ws.id) {
             " <== WORKTRACK_WORKSPACE"
         } else {
             ""
         };
 
+        let ws_wins: Vec<&niri::Window> = windows
+            .iter()
+            .filter(|w| w.workspace_id == Some(ws.id))
+            .collect();
+
         println!(
-            "  * id: {:<2} idx: {:<2} output: {:<5} name: {:<15} окон: {:<2}{}{}{}",
-            ws.id, idx_str, out_str, name_str, win_count, is_active_str, is_focused_str, match_tag
+            "  * id: {:<2} idx: {:<2} output: {:<5} name: {:<15} окон: {:<2}{is_active}{is_focused}{match_tag}",
+            ws.id, idx, out, name, ws_wins.len()
         );
 
         for w in ws_wins {
@@ -855,20 +805,12 @@ fn print_workspaces(cfg: &Config) {
 
     println!();
     if let Some(ref target) = cfg.workspace {
-        let matched = niri::find_workspace(&workspaces, target, cfg.output.as_deref());
-        match matched {
-            Some(w) => {
-                let name = w.name.as_deref().unwrap_or("<без имени>");
-                let out = w.output.as_deref().unwrap_or("?");
-                println!(
-                    "Настроен воркспейс: WORKTRACK_WORKSPACE=\"{target}\" (найден: \"{name}\" на {out})"
-                );
-            }
-            None => {
-                println!(
-                    "Настроен воркспейс: WORKTRACK_WORKSPACE=\"{target}\" (ВНИМАНИЕ: не найден в niri!)"
-                );
-            }
+        if let Some(w) = matched_ws {
+            let name = w.name.as_deref().unwrap_or("<без имени>");
+            let out = w.output.as_deref().unwrap_or("?");
+            println!("Настроен воркспейс: WORKTRACK_WORKSPACE=\"{target}\" (найден: \"{name}\" на {out})");
+        } else {
+            println!("Настроен воркспейс: WORKTRACK_WORKSPACE=\"{target}\" (ВНИМАНИЕ: не найден в niri!)");
         }
     } else {
         println!(
@@ -880,19 +822,14 @@ fn print_workspaces(cfg: &Config) {
 
 fn count_screenshots_today(dir: &Path) -> usize {
     let today = Local::now().format("%Y-%m-%d").to_string();
-    let day_dir = dir.join(today);
-    if let Ok(entries) = fs::read_dir(day_dir) {
-        entries
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .is_some_and(|ext| ext == "png" || ext == "jpg" || ext == "jpeg")
-            })
-            .count()
-    } else {
-        0
-    }
+    fs::read_dir(dir.join(today))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| is_screenshot_file(&e.path()))
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -919,7 +856,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
 
-            let _ = fs::remove_file(pause_file_path());
+            let _ = fs::remove_file(runtime_file("paused"));
 
             let exe = std::env::current_exe()?;
             let mut cmd = Command::new(exe);
@@ -938,7 +875,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let child = cmd.spawn()?;
-            let _ = fs::write(pid_file_path(), child.id().to_string());
+            let _ = fs::write(runtime_file("pid"), child.id().to_string());
             println!("Трекер запущен (PID {})", child.id());
         }
 
@@ -946,9 +883,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let today = Local::now().format("%Y-%m-%d").to_string();
             let day_dir = cfg.dir.join(&today);
             let _ = fs::create_dir_all(&day_dir);
-            capture_screen(&day_dir, &cfg, None);
+            let path = capture_screen(&day_dir, &cfg, None)?;
             let count = count_screenshots_today(&cfg.dir);
-            println!("Снимок сохранён в {day_dir:?} (всего за день: {count})");
+            println!("Снимок сохранён в {path:?} (всего за день: {count})");
         }
 
         Some(Commands::Daemon) => {
@@ -956,21 +893,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Some(Commands::Pause) => {
-            if get_running_pid().is_none() {
+            if get_running_pid().is_some() {
+                let _ = fs::File::create(runtime_file("paused"));
+                println!("Трекер поставлен на паузу (индикатор жёлтый)");
+            } else {
                 println!("Трекер не запущен");
-                return Ok(());
             }
-            let _ = fs::File::create(pause_file_path());
-            println!("Трекер поставлен на паузу (индикатор жёлтый)");
         }
 
         Some(Commands::Resume) => {
-            if get_running_pid().is_none() {
+            if get_running_pid().is_some() {
+                let _ = fs::remove_file(runtime_file("paused"));
+                println!("Трекер снят с паузы (индикатор красный)");
+            } else {
                 println!("Трекер не запущен");
-                return Ok(());
             }
-            let _ = fs::remove_file(pause_file_path());
-            println!("Трекер снят с паузы (индикатор красный)");
         }
 
         Some(Commands::Reset { yes }) => {
@@ -981,19 +918,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !yes {
                 println!("Внимание: сброс рабочей смены за сегодня ({today}).");
                 println!("Накопленное время и таймер рабочего дня будут обнулены.");
-                print!("Вы уверены, что хотите сбросить смену? [y/N]: ");
-                std::io::stdout().flush()?;
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input)?;
-                let ans = input.trim().to_lowercase();
-                if ans != "y" && ans != "yes" && ans != "д" && ans != "да" {
+                if !confirm_action("Вы уверены, что хотите сбросить смену?")? {
                     println!("Сброс отменён.");
                     return Ok(());
                 }
             }
 
             if get_running_pid().is_some() {
-                let reset_file = reset_file_path();
+                let reset_file = runtime_file("reset");
                 let _ = fs::File::create(&reset_file);
                 for _ in 0..10 {
                     if !reset_file.exists() {
@@ -1003,15 +935,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 println!("Рабочая смена успешно сброшена! Счётчик обнулён.");
             } else {
-                let shift = ShiftState {
-                    date: today.clone(),
-                    first_start: cfg
-                        .start_time
-                        .clone()
-                        .unwrap_or_else(|| Local::now().format("%H:%M:%S").to_string()),
-                    current_session_start: None,
-                    total_worked_secs: 0,
-                };
+                let mut shift = ShiftState::new(
+                    today.clone(),
+                    cfg.start_time.clone(),
+                    Local::now().format("%H:%M:%S").to_string(),
+                );
+                shift.current_session_start = None;
                 save_shift_state(&day_dir, &shift);
                 append_log(&day_dir, "RESET");
                 println!("Рабочая смена за сегодня успешно сброшена (счётчик обнулён).");
@@ -1075,9 +1004,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Процесс трекера не запущен");
             }
 
-            let _ = fs::remove_file(pause_file_path());
-            let _ = fs::remove_file(pid_file_path());
-            let _ = fs::remove_file(reset_file_path());
+            for f in ["paused", "pid", "reset"] {
+                let _ = fs::remove_file(runtime_file(f));
+            }
 
             let today = Local::now().format("%Y-%m-%d").to_string();
             let day_dir = cfg.dir.join(&today);
@@ -1095,9 +1024,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             match archive::pack_day(&cfg.dir, &today) {
                 Ok(archive_path) => {
-                    let size_str = fs::metadata(&archive_path)
-                        .map(|m| format!(" ({})", format_file_size(m.len())))
-                        .unwrap_or_default();
+                    let size_str = file_size_suffix(&archive_path);
                     println!("Архив готов: {archive_path:?}{size_str}");
                     println!("Для отправки архива на FTP выполните:\n  worktrack upload");
                 }
@@ -1111,9 +1038,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let today = Local::now().format("%Y-%m-%d").to_string();
             let archive_path = archive::pack_day(&cfg.dir, &today)?;
             let (total_worked, count) = get_today_worked_secs(&cfg);
-            let size_str = fs::metadata(&archive_path)
-                .map(|m| format!(" ({})", format_file_size(m.len())))
-                .unwrap_or_default();
+            let size_str = file_size_suffix(&archive_path);
             println!("Архив собран: {archive_path:?}{size_str}");
             println!("Всего отработано сегодня: {}", format_duration_hms(total_worked));
             println!("Скриншотов за день: {count}");
@@ -1145,27 +1070,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|m| format_file_size(m.len()))
                 .unwrap_or_else(|_| "неизвестно".to_string());
 
-            let destination_info = if let Some(ref raw_host) = cfg.ftp.host {
-                let host = raw_host
-                    .trim()
-                    .trim_start_matches("ftps://")
-                    .trim_start_matches("ftp://")
-                    .trim_end_matches('/')
-                    .trim();
-                let proto = if cfg.ftp.secure { "ftps" } else { "ftp" };
-                let port = cfg.ftp.port;
-                let user_prefix = cfg
-                    .ftp
-                    .user
-                    .as_deref()
-                    .map(|u| format!("{u}@"))
-                    .unwrap_or_default();
-                let rdir = cfg.ftp.remote_dir.as_deref().unwrap_or("").trim().trim_matches('/');
-                if rdir.is_empty() {
-                    format!("{proto}://{user_prefix}{host}:{port}/")
-                } else {
-                    format!("{proto}://{user_prefix}{host}:{port}/{rdir}/")
-                }
+            let destination_info = if let Some(url) = cfg.ftp.target_url(None) {
+                url
             } else if let Some(ref cmd) = cfg.upload_cmd {
                 format!("Команда: {cmd}")
             } else {
@@ -1190,16 +1096,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
 
-            if !yes {
-                print!("Отправить архив работодателю на FTP? [y/N]: ");
-                std::io::stdout().flush()?;
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input)?;
-                let ans = input.trim().to_lowercase();
-                if ans != "y" && ans != "yes" && ans != "д" && ans != "да" {
-                    println!("Отправка отменена.");
-                    return Ok(());
-                }
+            if !yes && !confirm_action("Отправить архив работодателю на FTP?")? {
+                println!("Отправка отменена.");
+                return Ok(());
             }
 
             archive::upload_archive(&archive_path, cfg.upload_cmd.as_deref(), &cfg.ftp)?;
@@ -1223,22 +1122,17 @@ fn handle_self_update() -> Result<(), Box<dyn std::error::Error>> {
     let pid = std::process::id();
     let tmp_path = current_exe.with_extension(format!("update.tmp.{pid}"));
 
-    let curl_res = std::process::Command::new("curl")
+    let success = Command::new("curl")
         .args(["-fsSL", url, "-o"])
         .arg(&tmp_path)
-        .status();
-
-    let success = match curl_res {
-        Ok(s) if s.success() => true,
-        _ => {
-            let wget_res = std::process::Command::new("wget")
-                .args(["-qO"])
-                .arg(&tmp_path)
-                .arg(url)
-                .status();
-            matches!(wget_res, Ok(s) if s.success())
-        }
-    };
+        .status()
+        .is_ok_and(|s| s.success())
+        || Command::new("wget")
+            .args(["-qO"])
+            .arg(&tmp_path)
+            .arg(url)
+            .status()
+            .is_ok_and(|s| s.success());
 
     if !success {
         let _ = fs::remove_file(&tmp_path);

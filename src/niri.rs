@@ -24,6 +24,12 @@ pub struct WindowLayout {
     pub window_size: Option<[u64; 2]>,
 }
 
+impl WindowLayout {
+    pub fn size(&self) -> Option<[f64; 2]> {
+        self.tile_size.or_else(|| self.window_size.map(|s| [s[0] as f64, s[1] as f64]))
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Window {
     pub id: u64,
@@ -45,15 +51,40 @@ pub struct Workspace {
     pub active_window_id: Option<u64>,
 }
 
-pub fn get_focused_output() -> Option<OutputInfo> {
-    let output = Command::new("niri")
-        .args(["msg", "-j", "focused-output"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+impl Workspace {
+    pub fn focus(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(ref name) = self.name {
+            focus_workspace(name)
+        } else if let Some(idx) = self.idx {
+            focus_workspace(&idx.to_string())
+        } else {
+            focus_workspace_previous()
+        }
     }
-    serde_json::from_slice(&output.stdout).ok()
+}
+
+fn niri_msg_json<T: for<'de> Deserialize<'de>>(subcmd: &str) -> Result<T, Box<dyn std::error::Error>> {
+    let output = Command::new("niri").args(["msg", "-j", subcmd]).output()?;
+    if !output.status.success() {
+        return Err(format!("niri msg -j {subcmd} failed").into());
+    }
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+fn niri_action(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+    let status = Command::new("niri")
+        .args(["msg", "action"])
+        .args(args)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("niri msg action {} failed", args.join(" ")).into())
+    }
+}
+
+pub fn get_focused_output() -> Option<OutputInfo> {
+    niri_msg_json("focused-output").ok()
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,54 +93,24 @@ struct FocusedWindowInfo {
 }
 
 pub fn get_focused_window_id() -> Option<u64> {
-    let output = Command::new("niri")
-        .args(["msg", "-j", "focused-window"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    serde_json::from_slice::<FocusedWindowInfo>(&output.stdout)
+    niri_msg_json::<FocusedWindowInfo>("focused-window")
         .ok()
         .map(|w| w.id)
 }
 
 pub fn get_all_outputs() -> Result<Vec<OutputInfo>, Box<dyn std::error::Error>> {
-    let output = Command::new("niri")
-        .args(["msg", "-j", "outputs"])
-        .output()?;
-    if !output.status.success() {
-        return Err("niri msg outputs failed".into());
-    }
-
-    let map: HashMap<String, OutputInfo> = serde_json::from_slice(&output.stdout)?;
+    let map: HashMap<String, OutputInfo> = niri_msg_json("outputs")?;
     let mut list: Vec<OutputInfo> = map.into_values().collect();
     list.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(list)
 }
 
 pub fn get_all_windows() -> Result<Vec<Window>, Box<dyn std::error::Error>> {
-    let output = Command::new("niri")
-        .args(["msg", "-j", "windows"])
-        .output()?;
-    if !output.status.success() {
-        return Err("niri msg windows failed".into());
-    }
-
-    let windows: Vec<Window> = serde_json::from_slice(&output.stdout)?;
-    Ok(windows)
+    niri_msg_json("windows")
 }
 
 pub fn get_all_workspaces() -> Result<Vec<Workspace>, Box<dyn std::error::Error>> {
-    let output = Command::new("niri")
-        .args(["msg", "-j", "workspaces"])
-        .output()?;
-    if !output.status.success() {
-        return Err("niri msg workspaces failed".into());
-    }
-
-    let list: Vec<Workspace> = serde_json::from_slice(&output.stdout)?;
-    Ok(list)
+    niri_msg_json("workspaces")
 }
 
 pub fn find_workspace(
@@ -127,8 +128,7 @@ pub fn find_workspace(
         && let Some(ws) = workspaces.iter().find(|w| {
             w.name
                 .as_deref()
-                .map(|n| n.eq_ignore_ascii_case(q))
-                .unwrap_or(false)
+                .is_some_and(|n| n.eq_ignore_ascii_case(q))
                 && w.output.as_deref() == Some(pref_out)
         })
     {
@@ -138,7 +138,7 @@ pub fn find_workspace(
     // 2. Try matching workspace name on any output (case-insensitive)
     if let Some(ws) = workspaces
         .iter()
-        .find(|w| w.name.as_deref().map(|n| n.eq_ignore_ascii_case(q)).unwrap_or(false))
+        .find(|w| w.name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(q)))
     {
         return Some(ws.clone());
     }
@@ -179,48 +179,20 @@ pub fn find_workspace(
 }
 
 pub fn focus_workspace(reference: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let status = Command::new("niri")
-        .args(["msg", "action", "focus-workspace", reference])
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("niri msg action focus-workspace {reference} failed").into())
-    }
+    niri_action(&["focus-workspace", reference])
 }
 
 pub fn focus_workspace_previous() -> Result<(), Box<dyn std::error::Error>> {
-    let status = Command::new("niri")
-        .args(["msg", "action", "focus-workspace-previous"])
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("niri msg action focus-workspace-previous failed".into())
-    }
+    niri_action(&["focus-workspace-previous"])
 }
 
 pub fn focus_window(id: u64) -> Result<(), Box<dyn std::error::Error>> {
     let id_str = id.to_string();
-    let status = Command::new("niri")
-        .args(["msg", "action", "focus-window", "--id", &id_str])
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("niri msg action focus-window --id {id} failed").into())
-    }
+    niri_action(&["focus-window", "--id", &id_str])
 }
 
 pub fn focus_monitor(output: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let status = Command::new("niri")
-        .args(["msg", "action", "focus-monitor", output])
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("niri msg action focus-monitor {output} failed").into())
-    }
+    niri_action(&["focus-monitor", output])
 }
 
 pub fn is_window_blocked(win: &Window, blocked_apps: &[String]) -> bool {
@@ -259,16 +231,12 @@ pub fn get_blocked_window_rects_on_output(
         return Vec::new();
     }
 
-    let workspaces = match get_all_workspaces() {
-        Ok(w) => w,
-        Err(_) => return Vec::new(),
-    };
-    let active_ws = match workspaces
+    let Some(active_ws) = get_all_workspaces()
+        .unwrap_or_default()
         .into_iter()
         .find(|w| w.output.as_deref() == Some(target_output) && w.is_active)
-    {
-        Some(w) => w,
-        None => return Vec::new(),
+    else {
+        return Vec::new();
     };
 
     get_blocked_window_rects_for_workspace(active_ws.id, target_output, blocked_apps)
@@ -283,9 +251,8 @@ pub fn get_blocked_window_rects_for_workspace(
         return Vec::new();
     }
 
-    let all_windows = match get_all_windows() {
-        Ok(w) => w,
-        Err(_) => return Vec::new(),
+    let Ok(all_windows) = get_all_windows() else {
+        return Vec::new();
     };
 
     let ws_windows: Vec<&Window> = all_windows
@@ -341,7 +308,7 @@ pub fn get_blocked_window_rects_for_workspace(
         let col_w = rows
             .iter()
             .filter_map(|w| w.layout.as_ref())
-            .filter_map(|l| l.tile_size.or_else(|| l.window_size.map(|s| [s[0] as f64, s[1] as f64])))
+            .filter_map(|l| l.size())
             .map(|s| s[0].round() as i64)
             .max()
             .unwrap_or(1200);
@@ -379,23 +346,22 @@ pub fn get_blocked_window_rects_for_workspace(
             && let Some(&(col_start, col_w)) = col_x_map.get(&pos[0])
         {
             let win_w = l
-                .tile_size
-                .or_else(|| l.window_size.map(|s| [s[0] as f64, s[1] as f64]))
+                .size()
                 .map(|s| s[0].round() as i64)
                 .unwrap_or(col_w);
 
-                    // Compute vertical position in column
-                    let rows = cols.get(&pos[0]).cloned().unwrap_or_default();
-                    let mut cur_y = GAP;
-                    let mut win_h = screen_h - 2 * GAP;
+            // Compute vertical position in column
+            let rows = cols.get(&pos[0]).cloned().unwrap_or_default();
+            let mut cur_y = GAP;
+            let mut win_h = screen_h - 2 * GAP;
 
-                    for row_win in rows {
-                        let r_h = row_win
-                            .layout
-                            .as_ref()
-                            .and_then(|rl| rl.tile_size.or_else(|| rl.window_size.map(|s| [s[0] as f64, s[1] as f64])))
-                            .map(|s| s[1].round() as i64)
-                            .unwrap_or(screen_h - 2 * GAP);
+            for row_win in rows {
+                let r_h = row_win
+                    .layout
+                    .as_ref()
+                    .and_then(|rl| rl.size())
+                    .map(|s| s[1].round() as i64)
+                    .unwrap_or(screen_h - 2 * GAP);
 
                         if row_win.id == w.id {
                             win_h = r_h;
@@ -457,10 +423,11 @@ pub fn capture_screenshot(
         .ok_or("No active output found")?;
 
     let mut cmd = Command::new("grim");
-    cmd.arg("-c");
-    cmd.args(["-o", &out_name]);
+    cmd.args(["-c", "-o", &out_name]);
+    let q_str;
     if path.ends_with(".jpg") || path.ends_with(".jpeg") {
-        cmd.args(["-t", "jpeg", "-q", &jpeg_quality.to_string()]);
+        q_str = jpeg_quality.to_string();
+        cmd.args(["-t", "jpeg", "-q", &q_str]);
     }
     cmd.arg(path);
 

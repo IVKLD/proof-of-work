@@ -129,7 +129,8 @@ esac
 
 # 6. Check external dependency grim
 if ! command -v grim >/dev/null 2>&1; then
-    echo "⚠️  Внимание: утилита 'grim' не найдена в PATH (требуется для снимков в Wayland)."
+    echo "Ошибка: требуется утилита 'grim'." >&2
+    exit 1
 fi
 
 echo ""
