@@ -72,6 +72,8 @@ enum Commands {
         /// Оболочка: bash, zsh, fish, elvish, powershell
         shell: Shell,
     },
+    /// Скачать и установить последний готовый бинарник с GitHub Releases без компиляции
+    Update,
 }
 
 fn runtime_dir() -> PathBuf {
@@ -1202,6 +1204,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             archive::upload_archive(&archive_path, cfg.upload_cmd.as_deref(), &cfg.ftp)?;
         }
+        Some(Commands::Update) => {
+            handle_self_update()?;
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_self_update() -> Result<(), Box<dyn std::error::Error>> {
+    let current_exe = std::env::current_exe()?;
+    let url = "https://github.com/IVKLD/proof-of-work/releases/latest/download/worktrack-linux-x86_64";
+
+    println!("=== Обновление worktrack (готовый бинарник) ===");
+    println!("Текущий путь: {}", current_exe.display());
+    println!("Скачивание последнего релиза: {url}");
+
+    let pid = std::process::id();
+    let tmp_path = current_exe.with_extension(format!("update.tmp.{pid}"));
+
+    let curl_res = std::process::Command::new("curl")
+        .args(["-fsSL", url, "-o"])
+        .arg(&tmp_path)
+        .status();
+
+    let success = match curl_res {
+        Ok(s) if s.success() => true,
+        _ => {
+            let wget_res = std::process::Command::new("wget")
+                .args(["-qO"])
+                .arg(&tmp_path)
+                .arg(url)
+                .status();
+            matches!(wget_res, Ok(s) if s.success())
+        }
+    };
+
+    if !success {
+        let _ = fs::remove_file(&tmp_path);
+        return Err("Не удалось скачать бинарник через curl/wget. Проверьте сеть или наличие релиза.".into());
+    }
+
+    let file_bytes = fs::read(&tmp_path)?;
+    if file_bytes.len() < 4 || &file_bytes[..4] != b"\x7fELF" {
+        let _ = fs::remove_file(&tmp_path);
+        return Err("Скачанный файл повреждён или не является бинарником Linux ELF.".into());
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&tmp_path)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&tmp_path, perms)?;
+    }
+
+    fs::rename(&tmp_path, &current_exe)?;
+
+    println!("Готово! Программа успешно обновлена до последней версии.");
+    if get_running_pid().is_some() {
+        println!("Внимание: сейчас запущен демон трекера. Чтобы применить обновление, выполните:");
+        println!("    worktrack stop && worktrack start");
     }
 
     Ok(())
