@@ -10,7 +10,7 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 ctrlc = "3.4"
 flate2 = "1.0"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 imageproc = "0.25"
 libc = "0.2"
 regex = "1"

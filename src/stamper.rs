@@ -1,4 +1,5 @@
 use ab_glyph::{FontRef, PxScale};
+use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::{ImageEncoder, Rgba, RgbaImage};
 use imageproc::drawing::{draw_text_mut, text_size};
@@ -12,17 +13,24 @@ pub fn stamp_screenshot(
     path: &Path,
     text: &str,
     blocked_rects: &[[u32; 4]],
+    jpeg_quality: u8,
+    max_width: Option<u32>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut img: RgbaImage = image::open(path)?.to_rgba8();
-    let (width, height) = img.dimensions();
+    let (mut width, mut height) = img.dimensions();
+    if width == 0 || height == 0 {
+        return Err("Image dimensions are zero".into());
+    }
 
     // 1. Black out all forbidden application windows
     for &[bx, by, bw, bh] in blocked_rects {
-        let max_x = (bx + bw).min(width);
-        let max_y = (by + bh).min(height);
-        for y in by..max_y {
-            for x in bx..max_x {
-                img.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+        if bx < width && by < height {
+            let max_x = bx.saturating_add(bw).min(width);
+            let max_y = by.saturating_add(bh).min(height);
+            for y in by..max_y {
+                for x in bx..max_x {
+                    img.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+                }
             }
         }
     }
@@ -32,6 +40,22 @@ pub fn stamp_screenshot(
     // without any transparency or wallpaper showing through.
     for p in img.pixels_mut() {
         p[3] = 255;
+    }
+
+    // 3. Optional downscale for screens larger than max_width (e.g. 4K down to 1080p for ~500KB)
+    if let Some(mw) = max_width
+        && width > mw && mw > 0
+    {
+        let target_w = mw;
+        let target_h = ((height as u64 * mw as u64) / width as u64) as u32;
+        img = image::imageops::resize(
+            &img,
+            target_w,
+            target_h,
+            image::imageops::FilterType::Triangle,
+        );
+        width = target_w;
+        height = target_h;
     }
 
     let font = FontRef::try_from_slice(FONT_DATA)?;
@@ -76,10 +100,44 @@ pub fn stamp_screenshot(
         );
     }
 
-    let file = File::create(path)?;
-    let writer = BufWriter::new(file);
-    let encoder = PngEncoder::new(writer);
-    encoder.write_image(&img, width, height, image::ExtendedColorType::Rgba8)?;
+    let pid = std::process::id();
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("screenshot");
+    let tmp_path = path.with_file_name(format!("{file_name}.tmp.{pid}"));
+    let encode_res = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let file = File::create(&tmp_path)?;
+        let writer = BufWriter::new(file);
+
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        if ext == "jpg" || ext == "jpeg" {
+            let rgb_img = image::DynamicImage::ImageRgba8(img).to_rgb8();
+            let mut encoder = JpegEncoder::new_with_quality(writer, jpeg_quality);
+            encoder.encode(
+                rgb_img.as_raw(),
+                width,
+                height,
+                image::ExtendedColorType::Rgb8,
+            )?;
+        } else {
+            let encoder = PngEncoder::new(writer);
+            encoder.write_image(&img, width, height, image::ExtendedColorType::Rgba8)?;
+        }
+        Ok(())
+    })();
+
+    if let Err(e) = encode_res {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+
+    std::fs::rename(&tmp_path, path)?;
 
     Ok(())
 }
@@ -93,7 +151,7 @@ mod tests {
         let img = RgbaImage::new(400, 200);
         let path = std::env::temp_dir().join("test_stamp.png");
         img.save(&path).unwrap();
-        stamp_screenshot(&path, "2026-11-02 21:45:00", &[]).unwrap();
+        stamp_screenshot(&path, "2026-11-02 21:45:00", &[], 80, None).unwrap();
         let stamped = image::open(&path).unwrap().to_rgba8();
         let mut non_black = 0;
         for p in stamped.pixels() {
@@ -107,6 +165,32 @@ mod tests {
     }
 
     #[test]
+    fn test_stamp_jpeg() {
+        let img = image::RgbImage::new(400, 200);
+        let path = std::env::temp_dir().join("test_stamp.jpg");
+        img.save(&path).unwrap();
+        stamp_screenshot(&path, "2026-11-02 21:45:00", &[], 80, None).unwrap();
+        let stamped = image::open(&path).unwrap().to_rgba8();
+        let (w, h) = stamped.dimensions();
+        assert_eq!(w, 400);
+        assert_eq!(h, 200);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_stamp_downscale() {
+        let img = image::RgbImage::new(3840, 2160);
+        let path = std::env::temp_dir().join("test_stamp_downscale.jpg");
+        img.save(&path).unwrap();
+        stamp_screenshot(&path, "2026-11-02 21:45:00", &[], 60, Some(1920)).unwrap();
+        let stamped = image::open(&path).unwrap().to_rgba8();
+        let (w, h) = stamped.dimensions();
+        assert_eq!(w, 1920);
+        assert_eq!(h, 1080);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn test_blocked_blackout() {
         let mut img = RgbaImage::new(400, 200);
         for p in img.pixels_mut() {
@@ -114,7 +198,7 @@ mod tests {
         }
         let path = std::env::temp_dir().join("test_blackout.png");
         img.save(&path).unwrap();
-        stamp_screenshot(&path, "2026-11-02 21:45:00", &[[50, 50, 100, 100]]).unwrap();
+        stamp_screenshot(&path, "2026-11-02 21:45:00", &[[50, 50, 100, 100]], 80, None).unwrap();
         let stamped = image::open(&path).unwrap().to_rgba8();
         assert_eq!(stamped.get_pixel(60, 60), &Rgba([0, 0, 0, 255]));
         assert_eq!(stamped.get_pixel(10, 10), &Rgba([255, 255, 255, 255]));
@@ -129,7 +213,7 @@ mod tests {
             if let Ok(entries) = std::fs::read_dir(day_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.extension().is_some_and(|e| e == "png") {
+                    if path.extension().is_some_and(|e| e == "png" || e == "jpg" || e == "jpeg") {
                         let img = image::open(&path).expect("Failed to open saved screenshot");
                         let (w, h) = (img.width(), img.height());
                         assert!(w > 0 && h > 0);

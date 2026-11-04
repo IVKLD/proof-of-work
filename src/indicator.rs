@@ -28,7 +28,7 @@ use wayland_client::{
     protocol::{wl_output, wl_shm, wl_surface},
 };
 
-const LOGICAL_WIDTH: u32 = 130;
+const LOGICAL_WIDTH: u32 = 186;
 const LOGICAL_HEIGHT: u32 = 24;
 const FONT_DATA: &[u8] = include_bytes!("../assets/font.ttf");
 
@@ -381,7 +381,8 @@ pub fn render_indicator_pill(
         }
     }
 
-    // 2. Countdown timer and daily remaining work time text
+    // 2. Real-time clock, countdown timer and daily remaining work time text
+    let clock_text = chrono::Local::now().format("%H:%M");
     let shot_text = if is_paused || shot_remaining < 0 {
         "PAUSE".to_string()
     } else {
@@ -406,7 +407,7 @@ pub fn render_indicator_pill(
         format!("{rh}h {rm:02}m")
     };
 
-    let text = format!("{shot_text} | {work_text}");
+    let text = format!("{clock_text} | {shot_text} | {work_text}");
 
     if let Ok(font) = FontRef::try_from_slice(FONT_DATA) {
         let font_scale = PxScale::from(12.0 * total_scale);
@@ -499,37 +500,21 @@ pub fn render_indicator_pill(
     }
 }
 
-pub fn run_indicator(
+fn run_indicator_session(
     paused: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     countdown: Arc<AtomicI64>,
     work_remaining: Arc<AtomicI64>,
     scale_override: Option<f32>,
     target_output: Arc<std::sync::RwLock<Option<String>>>,
-) {
-    let conn = match Connection::connect_to_env() {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-
-    let (globals, mut event_queue) = match registry_queue_init(&conn) {
-        Ok(q) => q,
-        Err(_) => return,
-    };
+) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = Connection::connect_to_env()?;
+    let (globals, mut event_queue) = registry_queue_init(&conn)?;
     let qh = event_queue.handle();
 
-    let compositor_state = match CompositorState::bind(&globals, &qh) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let layer_shell = match LayerShell::bind(&globals, &qh) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let shm = match Shm::bind(&globals, &qh) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
+    let compositor_state = CompositorState::bind(&globals, &qh)?;
+    let layer_shell = LayerShell::bind(&globals, &qh)?;
+    let shm = Shm::bind(&globals, &qh)?;
 
     let mut state = IndicatorState {
         registry_state: RegistryState::new(&globals),
@@ -570,30 +555,40 @@ pub fn run_indicator(
     let mut last_countdown = state.countdown.load(Ordering::Relaxed);
     let mut last_work_rem = state.work_remaining.load(Ordering::Relaxed);
     let mut last_target = state.target_output.read().ok().and_then(|g| g.clone());
+    let mut last_minute = chrono::Local::now().format("%H:%M").to_string();
     let raw_fd = conn.as_fd().as_raw_fd();
 
     while running.load(Ordering::Relaxed) {
-        let _ = event_queue.dispatch_pending(&mut state);
+        if let Err(e) = event_queue.dispatch_pending(&mut state) {
+            return Err(e.into());
+        }
 
         let current_paused = state.paused.load(Ordering::Relaxed);
         let current_countdown = state.countdown.load(Ordering::Relaxed);
         let current_work_rem = state.work_remaining.load(Ordering::Relaxed);
         let current_target = state.target_output.read().ok().and_then(|g| g.clone());
+        let current_minute = chrono::Local::now().format("%H:%M").to_string();
 
         if current_paused != last_paused
             || current_countdown != last_countdown
             || current_work_rem != last_work_rem
             || current_target != last_target
+            || current_minute != last_minute
         {
             last_paused = current_paused;
             last_countdown = current_countdown;
             last_work_rem = current_work_rem;
             last_target = current_target;
+            last_minute = current_minute;
             state.draw_all();
-            let _ = conn.flush();
+            if let Err(e) = conn.flush() {
+                return Err(e.into());
+            }
         }
 
-        let _ = conn.flush();
+        if let Err(e) = conn.flush() {
+            return Err(e.into());
+        }
 
         if let Some(guard) = conn.prepare_read() {
             let mut poll_fd = libc::pollfd {
@@ -604,14 +599,49 @@ pub fn run_indicator(
 
             let poll_ret = unsafe { libc::poll(&mut poll_fd, 1, 100) };
             if poll_ret > 0 {
-                let _ = guard.read();
+                if let Err(e) = guard.read() {
+                    return Err(e.into());
+                }
             }
         } else {
-            // Prevent busy spinning if prepare_read is None
             std::thread::sleep(Duration::from_millis(50));
         }
 
-        let _ = event_queue.dispatch_pending(&mut state);
+        if let Err(e) = event_queue.dispatch_pending(&mut state) {
+            return Err(e.into());
+        }
+    }
+
+    Ok(())
+}
+
+pub fn run_indicator(
+    paused: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
+    countdown: Arc<AtomicI64>,
+    work_remaining: Arc<AtomicI64>,
+    scale_override: Option<f32>,
+    target_output: Arc<std::sync::RwLock<Option<String>>>,
+) {
+    while running.load(Ordering::Relaxed) {
+        let res = run_indicator_session(
+            paused.clone(),
+            running.clone(),
+            countdown.clone(),
+            work_remaining.clone(),
+            scale_override,
+            target_output.clone(),
+        );
+
+        if res.is_err() && running.load(Ordering::Relaxed) {
+            // If connection broke (compositor reload/restart), wait 1s before reconnecting
+            for _ in 0..10 {
+                if !running.load(Ordering::Relaxed) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
     }
 }
 
@@ -621,16 +651,16 @@ mod tests {
 
     #[test]
     fn test_render_pill() {
-        let w = 286;
-        let h = 53;
+        let w = (LOGICAL_WIDTH as f32 * 2.2).round() as u32;
+        let h = (LOGICAL_HEIGHT as f32 * 2.2).round() as u32;
         let mut canvas = vec![0u8; (w * h * 4) as usize];
 
-        // 1. Test countdown "1:00 | 7h 45m"
+        // 1. Test countdown "HH:MM | 1:00 | 7h 45m"
         render_indicator_pill(&mut canvas, w, h, 2.2, false, 60, 7 * 3600 + 45 * 60);
         let mut y_min = h;
         let mut y_max = 0;
         for y in 0..h {
-            for x in 15..150 {
+            for x in 15..250 {
                 let idx = ((y * w + x) * 4) as usize;
                 let (b, g, r) = (canvas[idx], canvas[idx + 1], canvas[idx + 2]);
                 if r > 180 && g > 180 && b > 180 {
@@ -639,16 +669,16 @@ mod tests {
                 }
             }
         }
-        println!("1:00 | 7h 45m -> top margin: {}, bottom margin: {}", y_min, h - 1 - y_max);
+        println!("clock | 1:00 | 7h 45m -> top margin: {}, bottom margin: {}", y_min, h - 1 - y_max);
         assert!((y_min as i32 - (h - 1 - y_max) as i32).abs() <= 1);
 
-        // 2. Test "PAUSE | 7h 45m"
+        // 2. Test "HH:MM | PAUSE | 7h 45m"
         canvas.fill(0);
         render_indicator_pill(&mut canvas, w, h, 2.2, true, -1, 7 * 3600 + 45 * 60);
         let mut p_min = h;
         let mut p_max = 0;
         for y in 0..h {
-            for x in 15..150 {
+            for x in 15..250 {
                 let idx = ((y * w + x) * 4) as usize;
                 let (b, g, r) = (canvas[idx], canvas[idx + 1], canvas[idx + 2]);
                 if r > 180 && g > 180 && b > 180 {
@@ -657,7 +687,7 @@ mod tests {
                 }
             }
         }
-        println!("PAUSE | 7h 45m -> top margin: {}, bottom margin: {}", p_min, h - 1 - p_max);
+        println!("clock | PAUSE | 7h 45m -> top margin: {}, bottom margin: {}", p_min, h - 1 - p_max);
         assert!((p_min as i32 - (h - 1 - p_max) as i32).abs() <= 1);
     }
 }

@@ -6,6 +6,7 @@ use std::process::Command;
 pub struct LogicalOutput {
     pub width: u64,
     pub height: u64,
+    pub scale: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -17,11 +18,20 @@ pub struct OutputInfo {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+pub struct WindowLayout {
+    pub pos_in_scrolling_layout: Option<[u64; 2]>,
+    pub tile_size: Option<[f64; 2]>,
+    pub window_size: Option<[u64; 2]>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct Window {
     pub id: u64,
     pub title: Option<String>,
     pub app_id: Option<String>,
     pub workspace_id: Option<u64>,
+    pub _is_floating: Option<bool>,
+    pub layout: Option<WindowLayout>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -32,6 +42,7 @@ pub struct Workspace {
     pub output: Option<String>,
     pub is_active: bool,
     pub is_focused: bool,
+    pub active_window_id: Option<u64>,
 }
 
 pub fn get_focused_output() -> Option<OutputInfo> {
@@ -111,7 +122,20 @@ pub fn find_workspace(
         return None;
     }
 
-    // 1. Try matching workspace name (case-insensitive)
+    // 1. Try matching workspace name on preferred output first
+    if let Some(pref_out) = preferred_output
+        && let Some(ws) = workspaces.iter().find(|w| {
+            w.name
+                .as_deref()
+                .map(|n| n.eq_ignore_ascii_case(q))
+                .unwrap_or(false)
+                && w.output.as_deref() == Some(pref_out)
+        })
+    {
+        return Some(ws.clone());
+    }
+
+    // 2. Try matching workspace name on any output (case-insensitive)
     if let Some(ws) = workspaces
         .iter()
         .find(|w| w.name.as_deref().map(|n| n.eq_ignore_ascii_case(q)).unwrap_or(false))
@@ -119,7 +143,7 @@ pub fn find_workspace(
         return Some(ws.clone());
     }
 
-    // 2. Try matching explicit "id:<number>"
+    // 3. Try matching explicit "id:<number>"
     if let Some(id) = q
         .strip_prefix("id:")
         .and_then(|s| s.trim().parse::<u64>().ok())
@@ -127,7 +151,7 @@ pub fn find_workspace(
         return workspaces.iter().find(|w| w.id == id).cloned();
     }
 
-    // 3. Try matching numeric index (idx)
+    // 4. Try matching numeric index (idx)
     if let Ok(idx) = q.parse::<u64>() {
         // If preferred output specified, try matching idx on that output first
         if let Some(pref_out) = preferred_output {
@@ -211,7 +235,16 @@ pub fn is_window_blocked(win: &Window, blocked_apps: &[String]) -> bool {
         if b.is_empty() {
             continue;
         }
-        if app_id.contains(&b) || title.contains(&b) {
+        // 1. Direct match on app_id (standard for Wayland applications)
+        if !app_id.is_empty() && app_id.contains(&b) {
+            return true;
+        }
+        // 2. If app_id is unknown or empty, match on title substring
+        if app_id.is_empty() && title.contains(&b) {
+            return true;
+        }
+        // 3. Match title prefix/equality to avoid false positives (e.g. browser searching for "telegram")
+        if title == b || title.starts_with(&format!("{b} - ")) || title.starts_with(&format!("{b}: ")) {
             return true;
         }
     }
@@ -255,25 +288,158 @@ pub fn get_blocked_window_rects_for_workspace(
         Err(_) => return Vec::new(),
     };
 
-    let has_blocked = all_windows
+    let ws_windows: Vec<&Window> = all_windows
         .iter()
-        .any(|w| w.workspace_id == Some(target_ws_id) && is_window_blocked(w, blocked_apps));
+        .filter(|w| w.workspace_id == Some(target_ws_id))
+        .collect();
 
+    let has_blocked = ws_windows.iter().any(|w| is_window_blocked(w, blocked_apps));
     if !has_blocked {
         return Vec::new();
     }
 
-    // A forbidden application is detected on the captured workspace:
-    // Black out the entire screen to guarantee privacy without guessing partial scroll offsets.
     let outputs = get_all_outputs().unwrap_or_default();
-    if let Some(logical) = outputs
+    let (screen_w, screen_h, out_scale) = outputs
         .into_iter()
         .find(|o| o.name == target_output)
         .and_then(|o| o.logical)
-    {
-        return vec![[0, 0, logical.width as u32, logical.height as u32]];
+        .map(|l| (l.width as i64, l.height as i64, l.scale.unwrap_or(1.0)))
+        .unwrap_or((3840, 2160, 1.0));
+
+    let all_workspaces = get_all_workspaces().unwrap_or_default();
+    let active_win_id = all_workspaces
+        .iter()
+        .find(|w| w.id == target_ws_id)
+        .and_then(|w| w.active_window_id);
+
+    // Group windows by column
+    let mut cols: std::collections::BTreeMap<u64, Vec<&Window>> = std::collections::BTreeMap::new();
+    for w in &ws_windows {
+        if let Some(ref l) = w.layout
+            && let Some(pos) = l.pos_in_scrolling_layout
+        {
+            cols.entry(pos[0]).or_default().push(w);
+        }
     }
-    vec![[0, 0, 3840, 2160]]
+
+    // Sort rows within each column
+    for rows in cols.values_mut() {
+        rows.sort_by_key(|w| {
+            w.layout
+                .as_ref()
+                .and_then(|l| l.pos_in_scrolling_layout)
+                .map(|p| p[1])
+                .unwrap_or(0)
+        });
+    }
+
+    const GAP: i64 = 8;
+    let mut col_x_map: std::collections::HashMap<u64, (i64, i64)> = std::collections::HashMap::new();
+    let mut cur_x = GAP;
+
+    for (&col_idx, rows) in &cols {
+        let col_w = rows
+            .iter()
+            .filter_map(|w| w.layout.as_ref())
+            .filter_map(|l| l.tile_size.or_else(|| l.window_size.map(|s| [s[0] as f64, s[1] as f64])))
+            .map(|s| s[0].round() as i64)
+            .max()
+            .unwrap_or(1200);
+
+        col_x_map.insert(col_idx, (cur_x, col_w));
+        cur_x += col_w + GAP;
+    }
+
+    // Determine scrolling offset based on active window
+    let mut scroll_offset = 0i64;
+    if let Some(act_id) = active_win_id
+        && let Some(act_win) = ws_windows.iter().find(|w| w.id == act_id)
+        && let Some(ref l) = act_win.layout
+        && let Some(pos) = l.pos_in_scrolling_layout
+        && let Some(&(col_start, col_w)) = col_x_map.get(&pos[0])
+    {
+        let col_end = col_start + col_w;
+        if col_end > screen_w - GAP {
+            scroll_offset = col_end - (screen_w - GAP);
+        }
+        if col_start - scroll_offset < GAP {
+            scroll_offset = col_start - GAP;
+        }
+    }
+
+    // Calculate bounding rect for each blocked window
+    let mut blocked_rects = Vec::new();
+    for w in &ws_windows {
+        if !is_window_blocked(w, blocked_apps) {
+            continue;
+        }
+
+        if let Some(ref l) = w.layout
+            && let Some(pos) = l.pos_in_scrolling_layout
+            && let Some(&(col_start, col_w)) = col_x_map.get(&pos[0])
+        {
+            let win_w = l
+                .tile_size
+                .or_else(|| l.window_size.map(|s| [s[0] as f64, s[1] as f64]))
+                .map(|s| s[0].round() as i64)
+                .unwrap_or(col_w);
+
+                    // Compute vertical position in column
+                    let rows = cols.get(&pos[0]).cloned().unwrap_or_default();
+                    let mut cur_y = GAP;
+                    let mut win_h = screen_h - 2 * GAP;
+
+                    for row_win in rows {
+                        let r_h = row_win
+                            .layout
+                            .as_ref()
+                            .and_then(|rl| rl.tile_size.or_else(|| rl.window_size.map(|s| [s[0] as f64, s[1] as f64])))
+                            .map(|s| s[1].round() as i64)
+                            .unwrap_or(screen_h - 2 * GAP);
+
+                        if row_win.id == w.id {
+                            win_h = r_h;
+                            break;
+                        }
+                        cur_y += r_h + GAP;
+                    }
+
+                    let win_x = col_start - scroll_offset;
+                    let win_y = cur_y;
+
+                    // Intersect with screen viewport
+                    let x1 = win_x.max(0);
+                    let y1 = win_y.max(0);
+                    let x2 = (win_x + win_w).min(screen_w);
+                    let y2 = (win_y + win_h).min(screen_h);
+
+                    if x2 > x1 && y2 > y1 {
+                        let rx = ((x1 as f64) * out_scale).round() as u32;
+                        let ry = ((y1 as f64) * out_scale).round() as u32;
+                        let rw = (((x2 - x1) as f64) * out_scale).round() as u32;
+                        let rh = (((y2 - y1) as f64) * out_scale).round() as u32;
+                        blocked_rects.push([rx, ry, rw, rh]);
+                    }
+        }
+    }
+
+    // Check if any blocked window exists whose layout coordinates could not be determined (e.g. unmanaged floating window)
+    let any_blocked_unmapped = ws_windows.iter().any(|w| {
+        is_window_blocked(w, blocked_apps)
+            && w.layout
+                .as_ref()
+                .and_then(|l| l.pos_in_scrolling_layout)
+                .is_none()
+    });
+
+    // Fallback: only if a blocked window exists on this workspace but could NOT be located in layout at all
+    if any_blocked_unmapped {
+        let full_w = ((screen_w as f64) * out_scale).round() as u32;
+        let full_h = ((screen_h as f64) * out_scale).round() as u32;
+        blocked_rects.push([0, 0, full_w, full_h]);
+    }
+
+    blocked_rects
 }
 
 /// Captures a screenshot of the specified output (or the focused output if None).
@@ -283,6 +449,7 @@ pub fn get_blocked_window_rects_for_workspace(
 pub fn capture_screenshot(
     path: &str,
     target_output: Option<&str>,
+    jpeg_quality: u8,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let out_name = target_output
         .map(|s| s.to_string())
@@ -292,6 +459,9 @@ pub fn capture_screenshot(
     let mut cmd = Command::new("grim");
     cmd.arg("-c");
     cmd.args(["-o", &out_name]);
+    if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        cmd.args(["-t", "jpeg", "-q", &jpeg_quality.to_string()]);
+    }
     cmd.arg(path);
 
     let status = cmd.status()?;
@@ -316,6 +486,7 @@ mod tests {
                 output: Some("DP-2".to_string()),
                 is_active: false,
                 is_focused: false,
+                active_window_id: None,
             },
             Workspace {
                 id: 2,
@@ -324,6 +495,7 @@ mod tests {
                 output: Some("DP-1".to_string()),
                 is_active: true,
                 is_focused: true,
+                active_window_id: None,
             },
             Workspace {
                 id: 3,
@@ -332,6 +504,7 @@ mod tests {
                 output: Some("DP-1".to_string()),
                 is_active: false,
                 is_focused: false,
+                active_window_id: None,
             },
         ];
 
@@ -353,5 +526,50 @@ mod tests {
         // Not found
         let found = find_workspace(&workspaces, "nonexistent", None);
         assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_is_window_blocked() {
+        let blocked_apps = vec!["telegram".to_string(), "keepassxc".to_string()];
+
+        let win_telegram = Window {
+            id: 1,
+            title: Some("Telegram".to_string()),
+            app_id: Some("org.telegram.desktop".to_string()),
+            workspace_id: Some(1),
+            _is_floating: None,
+            layout: None,
+        };
+        assert!(is_window_blocked(&win_telegram, &blocked_apps));
+
+        let win_browser_searching = Window {
+            id: 2,
+            title: Some("how to create a telegram bot - Google Chrome".to_string()),
+            app_id: Some("google-chrome".to_string()),
+            workspace_id: Some(1),
+            _is_floating: None,
+            layout: None,
+        };
+        assert!(!is_window_blocked(&win_browser_searching, &blocked_apps));
+
+        let win_editor_file = Window {
+            id: 3,
+            title: Some("telegram_client.rs - nvim".to_string()),
+            app_id: Some("kitty".to_string()),
+            workspace_id: Some(1),
+            _is_floating: None,
+            layout: None,
+        };
+        assert!(!is_window_blocked(&win_editor_file, &blocked_apps));
+
+        let win_keepass = Window {
+            id: 4,
+            title: Some("KeePassXC - Passwords".to_string()),
+            app_id: Some("org.keepassxc.KeePassXC".to_string()),
+            workspace_id: Some(1),
+            _is_floating: None,
+            layout: None,
+        };
+        assert!(is_window_blocked(&win_keepass, &blocked_apps));
     }
 }
