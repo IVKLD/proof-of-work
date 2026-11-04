@@ -199,3 +199,7 @@ binds {
 ```
 
 После применения конфигурации (`nixos-rebuild switch --flake /etc/nixos#desktop`) бинарник `worktrack` и shell-автодополнения для bash, zsh и fish будут установлены в систему.
+
+> [!NOTE]
+> По умолчанию NixOS-модуль использует **готовый бинарник** (`packages.default`), поэтому компиляция Rust из исходников на вашем ПК **не выполняется** — пересборка системы занимает менее секунды.
+> Если вы хотите собрать пакет из исходников через `buildRustPackage`, задайте: `programs.worktrack.package = proof-of-work.packages.${pkgs.system}.source;`.
