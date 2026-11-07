@@ -112,8 +112,8 @@ fn test_8_hours_graphics_and_archive_soak() {
     for i in 1..=test_shots {
         let h = (i - 1) / 60;
         let m = (i - 1) % 60;
-        let time_str = format!("09-{m:02}-{h:02}");
-        let shot_path = day_dir.join(format!("{time_str}.jpg"));
+        let shot_name = format!("2026-11-05_09-{m:02}-{h:02}.jpg");
+        let shot_path = day_dir.join(&shot_name);
 
         // Copy sample frame
         fs::copy(&sample_path, &shot_path).unwrap();

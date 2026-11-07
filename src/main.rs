@@ -150,18 +150,20 @@ fn capture_screen(
     cfg: &Config,
     target_output_holder: Option<&Arc<std::sync::RwLock<Option<String>>>>,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let now_stamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let time_str = Local::now().format("%H-%M-%S").to_string();
+    let now = Local::now();
+    let now_stamp = now.format("%Y-%m-%d %H:%M:%S").to_string();
+    let date_str = now.format("%Y-%m-%d").to_string();
+    let time_str = now.format("%H-%M-%S").to_string();
 
     let ext = match cfg.image_format.as_str() {
         "png" => "png",
         _ => "jpg",
     };
-    let file_name = format!("{time_str}.{ext}");
+    let file_name = format!("{date_str}_{time_str}.{ext}");
     let mut file_path = day_dir.join(&file_name);
     if file_path.exists() {
-        let ms = Local::now().timestamp_subsec_millis();
-        let alt_name = format!("{time_str}_{ms:03}.{ext}");
+        let ms = now.timestamp_subsec_millis();
+        let alt_name = format!("{date_str}_{time_str}_{ms:03}.{ext}");
         file_path = day_dir.join(&alt_name);
     }
     let file_str = file_path.to_string_lossy().to_string();
@@ -1004,7 +1006,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Процесс трекера не запущен");
             }
 
-            for f in ["paused", "pid", "reset"] {
+            for f in ["paused", "pid", "reset", "stats"] {
                 let _ = fs::remove_file(runtime_file(f));
             }
 

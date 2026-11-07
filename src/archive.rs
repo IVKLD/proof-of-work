@@ -25,6 +25,7 @@ pub fn pack_day(root: &Path, day: &str) -> Result<PathBuf, Box<dyn std::error::E
             for entry in entries.flatten() {
                 let Ok(file_name) = entry.file_name().into_string() else { continue };
                 if file_name.contains(".tmp") {
+                    let _ = std::fs::remove_file(entry.path());
                     continue;
                 }
                 if let Ok(mut f) = File::open(entry.path()) {

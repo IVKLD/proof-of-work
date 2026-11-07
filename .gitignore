@@ -1,9 +1,12 @@
 # Rust / Cargo
 /target/
 Cargo.lock.bak
+*.rs.bk
 
 # Precompiled binaries and build outputs
 /bin/
+/dist/
+worktrack
 result
 result-*
 
@@ -13,7 +16,7 @@ result-*
 *.env
 !*.env.example
 
-# Temporary files, logs, and archives
+# Temporary files, runtime logs, and archives
 *.tmp
 *.tmp.*
 *.log
@@ -21,9 +24,19 @@ result-*
 events.log
 shift.json
 
-# User assets and editor files
+# Screenshots accidentally dumped into repo root (assets/ is preserved)
+/*.png
+/*.jpg
+/*.jpeg
 Pasted image*.png
+
+# Editor and OS junk
 .idea/
 .vscode/
 *.swp
+*.swo
 *~
+*.bak
+*.orig
+.DS_Store
+Thumbs.db
